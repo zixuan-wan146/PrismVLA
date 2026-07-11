@@ -1,0 +1,13 @@
+benchmark: libero
+stage: eval
+dry_run: true
+profile_env: |
+  # Minimal one-task LIBERO smoke profile.
+  PRISM_LIBERO_EPISODES=1
+  PRISM_LIBERO_TASK_SUITES=libero_spatial
+  PRISM_LIBERO_TASK_LIMIT=1
+  PRISM_LIBERO_EPISODE_OFFSET=0
+  PRISM_LIBERO_MAX_STEPS=1
+  PRISM_LIBERO_HORIZON=1
+  PRISM_LIBERO_CKPT_NAME=Prism_libero_smoke
+  PRISM_MUJOCO_GL=osmesa

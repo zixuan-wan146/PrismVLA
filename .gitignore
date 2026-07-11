@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environments
+.venv/
+venv/
+
+# Local agent/editor metadata
+.agents/
+.codex/
+
+# Local/generated outputs
+local_data/
+run_outputs/
+outputs/
+checkpoints/
+logs/
+wandb/
+swanlab/
+**/bar/
+
+# Large artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.h5
+*.hdf5
+*.mp4
+*.pkl
+*.parquet

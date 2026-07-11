@@ -1,0 +1,16 @@
+benchmark: calvin
+stage: eval
+dry_run: true
+profile_env: |
+  # Minimal one-sequence CALVIN smoke profile.
+  PRISM_MUJOCO_GL=osmesa
+  PRISM_CALVIN_ROOT=local_data/datasets/calvin/runtime
+  PRISM_CALVIN_DATASET_PATH=local_data/datasets/calvin/runtime/dataset/task_ABC_D
+  PRISM_CALVIN_NUM_SEQUENCES=1
+  PRISM_CALVIN_SEQUENCE_OFFSET=0
+  PRISM_CALVIN_MAX_STEPS_PER_SUBTASK=1
+  PRISM_CALVIN_HORIZON=1
+  PRISM_CALVIN_CKPT_NAME=Prism_calvin_smoke
+  PRISM_CALVIN_SAVE_VIDEO=0
+  PRISM_CALVIN_GRIPPER_MODE=passthrough
+  PRISM_CALVIN_RESET_MEMORY_SCOPE=sequence

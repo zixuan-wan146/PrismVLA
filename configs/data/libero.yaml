@@ -1,0 +1,14 @@
+benchmark: libero
+# Keep these dimensions aligned with the model checkpoint.
+max_action_dim: 24
+max_state_dim: 24
+max_views: 3
+
+data_groups:
+  # Generic LeRobot-style simulation example. Replace this path and view_map
+  # with the dataset you actually train on.
+  custom_sim:
+    CustomSimulation:
+      path: datasets/custom_sim/lerobot
+      view_map:
+        image_1: observation.images.image

@@ -1,0 +1,58 @@
+benchmark: libero
+stage: stage1
+run_name: libero_stage1_smoke
+seed: 42
+deterministic: true
+
+bridge_prism_config: configs/model/prism_smoke.yaml
+load_vlm: false
+device: cpu
+
+dataset_type: memory_token_cache
+cache_mode: stage1_smoke
+dataset_config_path: local_data/smoke/stage1_cache/manifest.json
+dataset_config_base_dir: .
+cache_dir: local_data/smoke/cache
+save_dir: local_data/smoke/runs/stage1_train_smoke
+
+embed_dim: 32
+hidden_dim: 32
+horizon: 32
+per_action_dim: 7
+state_dim: 8
+memory_entry_tokens: 4
+num_heads: 4
+num_layers: 1
+action_head_ffn_dim: 64
+num_plan_slots: 2
+short_memory_time_bins: 4
+max_vlm_tokens: 4
+
+progress_planner_checkpoint: local_data/smoke/progress_planner_smoke.pt
+memory_token_cache_sequence_training: true
+shuffle_trajectory_windows: false
+
+finetune_vlm: false
+finetune_action_head: true
+finetune_progress_planner: false
+enable_bridge_aux_loss: false
+
+max_steps: 1
+warmup_steps: 0
+batch_size: 1
+num_workers: 0
+log_interval: 1
+ckpt_interval: 1000000
+best_ckpt_interval: 1000000
+best_ckpt_min_step: 1000000
+
+lr: 1.0e-4
+min_lr_ratio: 0.0
+weight_decay: 0.0
+grad_clip_norm: 1.0
+dropout: 0.0
+min_cuda_memory_gb:
+
+num_inference_timesteps: 15
+inference_tau_schedule: midpoint
+avoid_endpoint_tau: true

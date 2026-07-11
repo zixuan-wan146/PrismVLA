@@ -1,0 +1,75 @@
+experiment_name: prism_smoke
+seed: 42
+
+vlm:
+  hidden_dim: 32
+  raw_dim: 32
+  raw_layers: [3, 6, 9, 12]
+  freeze: true
+  allow_image_token_truncation: false
+
+bridge:
+  enabled: true
+  variant: direct
+  num_layers: 1
+  num_heads: 4
+  num_bridge_tokens: 4
+  num_action_queries: 8
+  dropout: 0.0
+  raw_gate_init: 0.0
+  ffn_mult: 2
+
+context:
+  mode: fused_only
+  fused_gate_init: 0.0
+
+memory:
+  enabled: false
+  kind: fixed_recent_visual
+  hidden_dim: 32
+  views: [base, wrist]
+  short:
+    capacity: 2
+    offsets: [16, 8]
+  long:
+    capacity: 0
+  compression:
+    entry_tokens: 4
+    num_heads: 4
+    dropout: 0.0
+    max_age_steps: 512
+
+skill:
+  enabled: false
+  num_tokens: 4
+
+progress_planner:
+  enabled: true
+  checkpoint:
+  finetune: false
+  hidden_dim: 32
+  state_dim: 8
+  action_dim: 7
+  replan_stride: 16
+  latent_dim: 16
+  action_summary_hidden_dim: 32
+  state_hidden_dim: 32
+  updater_hidden_dim: 64
+  planner_ffn_dim: 64
+  planner_layers: 1
+  num_heads: 4
+  dropout: 0.0
+  completed_gate_bias: -2.0
+  stage_gate_bias: -1.0
+
+action_head:
+  kind: flowmatching
+  use_existing_checkpoint_config: false
+  horizon: 32
+  per_action_dim: 7
+  ffn_dim: 64
+  num_plan_slots: 2
+  visual_gate_lambda: 0.5
+  plan_gate_lambda: 0.25
+  short_memory_time_bins: 4
+  max_vlm_tokens: 4
