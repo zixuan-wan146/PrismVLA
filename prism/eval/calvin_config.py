@@ -9,7 +9,7 @@ from prism.eval.calvin_action_protocol import VALID_CALVIN_GRIPPER_MODES
 
 
 
-DEFAULT_CALVIN_ROOT = "local_data/datasets/calvin/runtime"
+DEFAULT_CALVIN_ROOT = "../benchmarks/calvin/runtime"
 DEFAULT_CALVIN_DATASET = f"{DEFAULT_CALVIN_ROOT}/dataset/task_ABC_D"
 VALID_RESET_MEMORY_SCOPES = {"sequence", "subtask", "never"}
 

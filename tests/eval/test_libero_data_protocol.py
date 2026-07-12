@@ -30,15 +30,15 @@ def test_build_request_from_observation_uses_two_raw_libero_views():
 
     request = build_request_from_observation(obs, "put the mug away", reset_memory=True)
 
-    assert request["prompt"] == "put the mug away"
-    assert request["benchmark"] == "libero"
-    assert tuple(request["images_by_view"]) == ("agentview_rgb", "eye_in_hand_rgb")
-    assert request["images_by_view"]["agentview_rgb"] == agent.tolist()
-    assert request["images_by_view"]["eye_in_hand_rgb"] == wrist.tolist()
-    assert request["action_dim"] == 7
-    assert request["robot_key"] == "libero"
-    assert request["reset_memory"] is True
-    assert len(request["state"]) == 8
+    assert request.prompt == "put the mug away"
+    assert request.benchmark == "libero"
+    assert tuple(request.images_by_view) == ("agentview_rgb", "eye_in_hand_rgb")
+    np.testing.assert_array_equal(request.images_by_view["agentview_rgb"], agent)
+    np.testing.assert_array_equal(request.images_by_view["eye_in_hand_rgb"], wrist)
+    assert request.action_dim == 7
+    assert request.robot_key == "libero"
+    assert request.reset_memory is True
+    assert request.state.shape == (8,)
 
 
 def test_build_request_from_observation_includes_offset_short_memory_when_history_has_frames():
@@ -52,10 +52,11 @@ def test_build_request_from_observation_includes_offset_short_memory_when_histor
 
     request = build_request_from_observation(obs16, "pick", history=history, current_step=16)
 
-    short_memory = request["short_memory_images_by_offset"]
-    assert tuple(short_memory) == ("16", "8")
-    assert short_memory["16"]["agentview_rgb"] == obs0["agentview_image"].tolist()
-    assert short_memory["8"]["eye_in_hand_rgb"] == obs8["robot0_eye_in_hand_image"].tolist()
+    short_memory = request.short_memory_images_by_offset
+    assert short_memory is not None
+    assert tuple(short_memory) == (16, 8)
+    np.testing.assert_array_equal(short_memory[16]["agentview_rgb"], obs0["agentview_image"])
+    np.testing.assert_array_equal(short_memory[8]["eye_in_hand_rgb"], obs8["robot0_eye_in_hand_image"])
 
 
 def test_build_request_from_observation_emits_empty_short_memory_object_for_warmup_steps():
@@ -65,7 +66,7 @@ def test_build_request_from_observation_emits_empty_short_memory_object_for_warm
 
     request = build_request_from_observation(obs, "pick", history=history, current_step=0)
 
-    assert request["short_memory_images_by_offset"] == {}
+    assert request.short_memory_images_by_offset == {}
 
 
 def test_build_request_from_observation_includes_executed_actions():
@@ -78,8 +79,11 @@ def test_build_request_from_observation_includes_executed_actions():
         executed_action_mask=[True],
     )
 
-    assert request["executed_actions"] == [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1.0]]
-    assert request["executed_action_mask"] == [1]
+    np.testing.assert_array_equal(
+        request.executed_actions,
+        np.array([[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1.0]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(request.executed_action_mask, np.array([True]))
 
 
 def _obs_with_image_values(*, agent_value: int, wrist_value: int) -> dict:

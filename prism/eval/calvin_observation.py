@@ -21,7 +21,12 @@ def build_calvin_images_by_view(obs: Mapping[str, Any]) -> dict[str, np.ndarray]
 
 
 def build_calvin_state(obs: Mapping[str, Any]) -> np.ndarray:
-    return np.asarray(_extract_robot_obs(obs), dtype=np.float32).reshape(-1)
+    robot_obs = np.asarray(_extract_robot_obs(obs), dtype=np.float32).reshape(-1)
+    if robot_obs.size < 8:
+        raise ValueError(f"CALVIN robot_obs must contain at least 8 values, got {robot_obs.size}")
+    # Training data uses TCP xyz/rpy, gripper width, and the commanded gripper state.
+    # Raw CALVIN observations place seven arm joints between the final two fields.
+    return np.concatenate((robot_obs[:7], robot_obs[-1:])).astype(np.float32, copy=False)
 
 
 def _extract_rgb(obs: Mapping[str, Any], key: str) -> np.ndarray:
@@ -42,4 +47,3 @@ def _extract_robot_obs(obs: Mapping[str, Any]) -> np.ndarray:
     if "state" in obs:
         return np.asarray(obs["state"], dtype=np.float32)
     raise KeyError("CALVIN observation has no robot_obs")
-

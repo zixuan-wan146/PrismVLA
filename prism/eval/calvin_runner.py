@@ -7,6 +7,8 @@ from prism.eval.calvin_history import CalvinObservationHistory
 from prism.eval.calvin_observation import build_calvin_images_by_view
 from prism.eval.calvin_request_builder import build_request_from_observation
 from prism.eval.calvin_spec import CALVIN_SPEC
+from prism.eval.policy_client import PolicyClient, WebSocketPolicyClient
+from prism.serve.protocol import PolicyRequest
 
 # --- migrated from src/prism/benchmarks/calvin/runner.py ---
 import asyncio
@@ -19,8 +21,6 @@ import random
 from typing import Any
 
 import numpy as np
-import websockets
-
 
 
 LOG = logging.getLogger(__name__)
@@ -164,7 +164,7 @@ def load_eval_sequences(config: CalvinClientConfig) -> list[tuple[Any, list[str]
     return [(initial_state, [str(task) for task in eval_sequence]) for initial_state, eval_sequence in selected]
 
 
-def obs_to_json_dict(
+def build_policy_request(
     obs: dict[str, Any],
     *,
     prompt: str,
@@ -173,7 +173,7 @@ def obs_to_json_dict(
     reset_memory: bool,
     executed_actions: list[list[float]] | None,
     executed_action_mask: list[bool] | None,
-) -> dict[str, Any]:
+) -> PolicyRequest:
     return build_request_from_observation(
         obs,
         prompt,
@@ -185,7 +185,11 @@ def obs_to_json_dict(
     )
 
 
-async def run_calvin_eval(config: CalvinClientConfig | None = None) -> list[SequenceResult]:
+async def run_calvin_eval(
+    config: CalvinClientConfig | None = None,
+    *,
+    policy_client: PolicyClient | None = None,
+) -> list[SequenceResult]:
     config = CalvinClientConfig.from_env() if config is None else config
     configure_calvin_environment(config)
     configure_logging(config)
@@ -200,14 +204,15 @@ async def run_calvin_eval(config: CalvinClientConfig | None = None) -> list[Sequ
     LOG.info("Creating CALVIN environment from %s", config.dataset_path)
     env = make_env(config)
     results: list[SequenceResult] = []
+    client = policy_client or WebSocketPolicyClient(config.server_url)
     try:
-        async with websockets.connect(config.server_url, ping_interval=None, ping_timeout=None) as ws:
-            LOG.info("Connected to PrismVLA server at %s", config.server_url)
+        async with client:
+            LOG.info("Policy client ready for %s", config.server_url)
             for local_index, (initial_state, eval_sequence) in enumerate(sequences):
                 sequence_id = config.sequence_offset + local_index
                 LOG.info("Sequence %s: %s", sequence_id, " -> ".join(eval_sequence))
                 result = await evaluate_sequence(
-                    ws=ws,
+                    policy_client=client,
                     env=env,
                     task_oracle=task_oracle,
                     annotations=annotations,
@@ -236,7 +241,7 @@ async def run_calvin_eval(config: CalvinClientConfig | None = None) -> list[Sequ
 
 async def evaluate_sequence(
     *,
-    ws: Any,
+    policy_client: PolicyClient,
     env: CalvinEnvWrapperRaw,
     task_oracle: Any,
     annotations: dict[str, list[str]],
@@ -268,7 +273,7 @@ async def evaluate_sequence(
             config.reset_memory_scope == "sequence" and subtask_index == 0
         )
         rollout = await rollout_subtask(
-            ws=ws,
+            policy_client=policy_client,
             env=env,
             task_oracle=task_oracle,
             subtask=subtask,
@@ -311,7 +316,7 @@ async def evaluate_sequence(
 
 async def rollout_subtask(
     *,
-    ws: Any,
+    policy_client: PolicyClient,
     env: CalvinEnvWrapperRaw,
     task_oracle: Any,
     subtask: str,
@@ -337,7 +342,7 @@ async def rollout_subtask(
 
     while control_steps < config.max_steps_per_subtask:
         decision_steps += 1
-        send_data = obs_to_json_dict(
+        request = build_policy_request(
             obs,
             prompt=prompt,
             history=history,
@@ -347,14 +352,15 @@ async def rollout_subtask(
             executed_action_mask=current_last_mask or None,
         )
         reset_memory = False
-        await ws.send(json.dumps(send_data))
-        response = await ws.recv()
+        response = await policy_client.infer(request)
         try:
             action_chunk = parse_action_response(response, horizon=config.horizon)
         except Exception as exc:
             log.error("CALVIN action parsing failed for %s: %s", subtask, exc)
             video_paths = _maybe_save_video(frames, config, sequence_id, subtask_index, subtask, "parse_error")
-            return _rollout_result(False, decision_steps, control_steps, f"action_parse_error: {exc}", video_paths, [], [])
+            return _rollout_result(
+                False, decision_steps, control_steps, f"action_parse_error: {exc}", video_paths, [], []
+            )
 
         executed_this_decision: list[list[float]] = []
         executed_mask_this_decision: list[bool] = []
@@ -487,6 +493,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-

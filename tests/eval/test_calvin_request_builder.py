@@ -23,13 +23,31 @@ def test_calvin_request_builder_uses_policy_request_contract_with_memory_and_act
         executed_action_mask=[True],
     )
 
-    assert request["benchmark"] == "calvin"
-    assert sorted(request["images_by_view"]) == ["image", "wrist_image"]
-    assert request["state"] == [16.0] * 8
-    assert request["action_dim"] == 7
-    assert request["reset_memory"] is True
-    assert "16" in request["short_memory_images_by_offset"]
-    assert request["executed_action_mask"] == [1]
+    assert request.benchmark == "calvin"
+    assert sorted(request.images_by_view) == ["image", "wrist_image"]
+    np.testing.assert_array_equal(request.state, np.full(8, 16.0, dtype=np.float32))
+    assert request.action_dim == 7
+    assert request.reset_memory is True
+    assert request.short_memory_images_by_offset is not None
+    assert 16 in request.short_memory_images_by_offset
+    np.testing.assert_array_equal(request.executed_action_mask, np.array([True]))
+
+
+def test_calvin_request_builder_projects_raw_simulator_state_to_training_layout():
+    obs = _obs(0)
+    obs["robot_obs"] = np.arange(15, dtype=np.float32)
+
+    request = build_request_from_observation(obs, "open the drawer")
+
+    np.testing.assert_array_equal(
+        request.state,
+        np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 14.0], dtype=np.float32),
+    )
+
+
+def test_calvin_request_builder_rejects_short_robot_state():
+    with np.testing.assert_raises_regex(ValueError, "at least 8 values"):
+        build_request_from_observation({**_obs(0), "robot_obs": np.zeros(7)}, "open the drawer")
 
 
 def _obs(value: int) -> dict:

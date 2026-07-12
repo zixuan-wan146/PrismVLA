@@ -9,19 +9,18 @@ New runtime code should use :mod:`prism.serve.engine`.
 from collections.abc import Mapping
 from typing import Any
 
+from prism.serve.protocol import PolicyRequest, checkpoint_normalizer_dim, policy_request_from_mapping
 from prism.serve.engine import (
     PolicyInferenceEngine,
-    PolicyRequest,
     RuntimePolicyState,
-    checkpoint_normalizer_dim,
-    policy_request_from_json,
 )
 
+
 def validate_inference_request(data: Mapping[str, Any], **_kwargs) -> PolicyRequest:
-    return policy_request_from_json(data)
+    return policy_request_from_mapping(data)
 
 
-__all__ = ["PolicyRequest", "checkpoint_normalizer_dim", "policy_request_from_json", "validate_inference_request"]
+__all__ = ["PolicyRequest", "checkpoint_normalizer_dim", "policy_request_from_mapping", "validate_inference_request"]
 
 # --- migrated from src/prism/runtime/websocket_server.py ---
 import argparse
@@ -30,15 +29,25 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import torch
 import websockets
 
 from prism.models.policy import PrismPolicy
-from prism.config import DEFAULT_MAX_MESSAGE_SIZE
 from prism.config import DEFAULT_SERVER_HOST
 from prism.config import DEFAULT_SERVER_PORT
 from prism.config import TARGET_STATE_DIM
 from prism.utils import NormalizationStats
+from prism.serve.wire import (
+    PROTOCOL_VERSION,
+    WIRE_FORMAT,
+    error_envelope,
+    metadata_envelope,
+    pack_message,
+    success_envelope,
+    unpack_message,
+    validate_envelope,
+)
 
 
 def resolve_device(device: str) -> torch.device:
@@ -129,25 +138,51 @@ def load_model_and_normalizer(
 
     normalizer_dim = checkpoint_normalizer_dim(config)
     normalizer = NormalizationStats(stats, target_dim=normalizer_dim)
-    logging.info("Loaded normalization stats robot_keys=%s default_robot_key=%s", normalizer.robot_keys, normalizer.robot_key)
+    logging.info(
+        "Loaded normalization stats robot_keys=%s default_robot_key=%s", normalizer.robot_keys, normalizer.robot_key
+    )
     return model, normalizer
+
+
+def build_server_metadata(engine: PolicyInferenceEngine) -> dict[str, Any]:
+    model = getattr(engine, "model", None)
+    config = getattr(model, "config", {}) if model is not None else {}
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "wire_format": WIRE_FORMAT,
+        "action_horizon": int(getattr(model, "action_horizon", config.get("horizon", 0)) or 0),
+        "action_dim": int(getattr(model, "per_action_dim", config.get("per_action_dim", 0)) or 0),
+    }
 
 
 async def handle_request(websocket, engine: PolicyInferenceEngine, inference_lock: asyncio.Lock):
     logging.info("Client connected")
     runtime_state = RuntimePolicyState()
+    await websocket.send(pack_message(metadata_envelope(build_server_metadata(engine))))
     try:
-        async for message in websocket:
+        async for raw_message in websocket:
+            request_id = -1
             try:
-                request = policy_request_from_json(json.loads(message))
-                logging.info("Received policy request benchmark=%s", request.benchmark)
+                message = validate_envelope(unpack_message(raw_message), expected_type="infer")
+                request_id = int(message.get("request_id", -1))
+                payload = message.get("payload")
+                if not isinstance(payload, Mapping):
+                    raise ValueError("Inference payload must be a mapping")
+                request = policy_request_from_mapping(payload)
+                logging.info("Received policy request benchmark=%s request_id=%s", request.benchmark, request_id)
                 async with inference_lock:
-                    actions = engine.infer(request, runtime_state)
-                await websocket.send(json.dumps(actions))
-                logging.info("Sent action chunk")
+                    result = engine.infer(request, runtime_state)
+                if isinstance(result, Mapping):
+                    data = dict(result)
+                    if "actions" in data:
+                        data["actions"] = np.asarray(data["actions"], dtype=np.float32)
+                else:
+                    data = {"actions": np.asarray(result, dtype=np.float32)}
+                await websocket.send(pack_message(success_envelope(request_id, data)))
+                logging.info("Sent action chunk request_id=%s", request_id)
             except Exception as exc:
-                logging.exception("Failed to handle request")
-                await websocket.send(json.dumps({"error": str(exc)}))
+                logging.exception("Failed to handle request_id=%s", request_id)
+                await websocket.send(pack_message(error_envelope(request_id, str(exc))))
     except websockets.exceptions.ConnectionClosed:
         logging.info("Client disconnected.")
 
@@ -184,7 +219,8 @@ async def serve(engine: PolicyInferenceEngine, *, host: str, port: int) -> None:
         lambda ws: handle_request(ws, engine, inference_lock),
         host,
         port,
-        max_size=DEFAULT_MAX_MESSAGE_SIZE,
+        compression=None,
+        max_size=None,
         ping_interval=None,
         ping_timeout=None,
     ):
@@ -213,10 +249,37 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def server_argv_from_config(cfg) -> list[str]:
+    raw = dict(getattr(cfg, "raw", {}) or {})
+    ckpt_dir = raw.get("ckpt_dir")
+    if not ckpt_dir:
+        raise ValueError("Serving config must define ckpt_dir")
+
+    argv = ["--ckpt_dir", str(ckpt_dir)]
+    value_options = {
+        "host": "--host",
+        "port": "--port",
+        "device": "--device",
+        "inference_steps": "--inference_steps",
+        "vlm_name": "--vlm_name",
+    }
+    for key, option in value_options.items():
+        value = raw.get(key)
+        if value is not None and str(value) != "":
+            argv.extend((option, str(value)))
+
+    if bool(raw.get("vlm_local_files_only", False)):
+        argv.append("--vlm_local_files_only")
+    if bool(raw.get("allow_unsafe_checkpoint_load", False)):
+        argv.append("--allow_unsafe_checkpoint_load")
+    return argv
 
 
-def serve_from_config(cfg):
+def serve_from_config(cfg) -> int:
     """Config-dispatched serving entry point used by scripts/serve.py."""
 
-    raw = getattr(cfg, "raw", {})
-    return main(raw) if callable(globals().get("main")) else None
+    return main(server_argv_from_config(cfg))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

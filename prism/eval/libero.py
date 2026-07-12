@@ -42,46 +42,22 @@ from collections.abc import Mapping, Sequence
 import json
 from typing import Any
 
+from prism.eval.action_response import parse_action_response as parse_policy_action_response
+
 
 LIBERO_CONTROL_DIM = 7
 
 
 def parse_action_response(
-    message: str,
+    message: Any,
     horizon: int,
     min_action_dim: int = LIBERO_CONTROL_DIM,
 ) -> list[list[float]]:
-    if horizon <= 0:
-        raise ValueError(f"horizon must be positive, got {horizon}")
-
-    try:
-        payload = json.loads(message)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Action response is not valid JSON: {exc}") from exc
-
-    if isinstance(payload, Mapping):
-        if "error" in payload:
-            raise RuntimeError(f"Prism server returned error: {payload['error']}")
-        if "actions" not in payload:
-            raise ValueError(f"Action response object must contain 'actions', got keys: {sorted(payload.keys())}")
-        payload = payload["actions"]
-
-    if not isinstance(payload, list):
-        raise ValueError(f"Action response must be a list, got {type(payload).__name__}")
-
-    if len(payload) < horizon:
-        raise ValueError(f"Action response has {len(payload)} step(s), expected at least horizon {horizon}")
-
-    actions: list[list[float]] = []
-    for step, row in enumerate(payload[:horizon]):
-        if not isinstance(row, Sequence) or isinstance(row, (str, bytes, bytearray)):
-            raise ValueError(f"Action at step {step} must be a sequence, got {type(row).__name__}")
-        if len(row) < min_action_dim:
-            raise ValueError(
-                f"Action at step {step} has dimension {len(row)}, expected at least {min_action_dim}"
-            )
-        actions.append([_to_float(value, step, dim) for dim, value in enumerate(row)])
-    return actions
+    return parse_policy_action_response(
+        message,
+        horizon=horizon,
+        min_action_dim=min_action_dim,
+    )
 
 
 def to_libero_action(action: Sequence[float], control_dim: int = LIBERO_CONTROL_DIM) -> list[float]:
@@ -94,12 +70,6 @@ def to_libero_action(action: Sequence[float], control_dim: int = LIBERO_CONTROL_
     libero_action[6] = 1.0 if libero_action[6] >= 0.0 else -1.0
     return libero_action
 
-
-def _to_float(value: Any, step: int, dim: int) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Action value at step {step}, dim {dim} is not numeric: {value!r}") from exc
 
 # --- migrated from src/prism/benchmarks/libero/data_protocol.py ---
 
@@ -138,8 +108,7 @@ LIBERO_ENV_VIEW_TO_CACHE_VIEW = {
 
 def build_libero_images_by_view(obs: Mapping[str, Any]) -> dict[str, np.ndarray]:
     return {
-        cache_view: np.ascontiguousarray(obs[env_key])
-        for env_key, cache_view in LIBERO_ENV_VIEW_TO_CACHE_VIEW.items()
+        cache_view: np.ascontiguousarray(obs[env_key]) for env_key, cache_view in LIBERO_ENV_VIEW_TO_CACHE_VIEW.items()
     }
 
 
@@ -166,12 +135,12 @@ def quat2axisangle(quat: Sequence[float] | np.ndarray) -> np.ndarray:
         return np.zeros(3)
     return (quat[:3] * 2.0 * math.acos(float(quat[3]))) / den
 
+
 # --- migrated from src/prism/benchmarks/libero/request_builder.py ---
 from collections.abc import Mapping
 from typing import Any
 
-from prism.serve.engine import PolicyRequest
-
+from prism.serve.protocol import PolicyRequest
 
 
 def build_request_from_observation(
@@ -184,7 +153,7 @@ def build_request_from_observation(
     executed_actions: Any | None = None,
     executed_action_mask: Any | None = None,
     robot_key: str | None = LIBERO_SPEC.name,
-) -> dict[str, Any]:
+) -> PolicyRequest:
     short_memory_images_by_offset = None
     if history is not None:
         if current_step is None:
@@ -193,7 +162,7 @@ def build_request_from_observation(
             current_step=int(current_step),
             offsets=LIBERO_SPEC.short_memory_offsets,
         )
-    request = PolicyRequest(
+    return PolicyRequest(
         benchmark=LIBERO_SPEC.name,
         prompt=str(prompt or ""),
         images_by_view=build_libero_images_by_view(obs),
@@ -205,35 +174,6 @@ def build_request_from_observation(
         executed_actions=None if executed_actions is None else _float_array(executed_actions),
         executed_action_mask=None if executed_action_mask is None else _bool_array(executed_action_mask),
     )
-    return policy_request_to_json(request)
-
-
-def policy_request_to_json(request: PolicyRequest) -> dict[str, Any]:
-    payload = {
-        "benchmark": request.benchmark,
-        "prompt": request.prompt,
-        "images_by_view": {
-            view_name: image.astype("uint8").tolist()
-            for view_name, image in request.images_by_view.items()
-        },
-        "state": request.state.astype("float32").tolist(),
-        "action_dim": int(request.action_dim),
-        "robot_key": request.robot_key,
-        "reset_memory": bool(request.reset_memory),
-    }
-    if request.short_memory_images_by_offset is not None:
-        payload["short_memory_images_by_offset"] = {
-            str(offset): {
-                view_name: image.astype("uint8").tolist()
-                for view_name, image in images_by_view.items()
-            }
-            for offset, images_by_view in request.short_memory_images_by_offset.items()
-        }
-    if request.executed_actions is not None:
-        payload["executed_actions"] = request.executed_actions.astype("float32").tolist()
-    if request.executed_action_mask is not None:
-        payload["executed_action_mask"] = request.executed_action_mask.astype(bool).astype(int).tolist()
-    return payload
 
 
 def _float_array(value: Any):
@@ -247,12 +187,12 @@ def _bool_array(value: Any):
 
     return np.asarray(value, dtype=bool)
 
+
 # --- migrated from src/prism/benchmarks/libero/history.py ---
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
-
 
 
 class LiberoObservationHistory:
@@ -287,8 +227,7 @@ class LiberoObservationHistory:
             step_index = int(current_step) - offset
             if step_index in self._images_by_step:
                 output[offset] = {
-                    view_name: image.copy()
-                    for view_name, image in self._images_by_step[step_index].items()
+                    view_name: image.copy() for view_name, image in self._images_by_step[step_index].items()
                 }
         return output
 
@@ -297,6 +236,7 @@ class LiberoObservationHistory:
         stale_steps = [step for step in self._images_by_step if step < min_step]
         for step in stale_steps:
             del self._images_by_step[step]
+
 
 # --- migrated from src/prism/benchmarks/libero/config.py ---
 from dataclasses import dataclass
@@ -443,6 +383,7 @@ def configure_mujoco_environment(
     if config.mujoco_gl == "egl":
         environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
+
 # --- migrated from src/prism/benchmarks/libero/eval_summary.py ---
 from dataclasses import asdict, dataclass, is_dataclass
 import json
@@ -471,9 +412,7 @@ def summarize_episode_results(results: Sequence[EpisodeResult | Mapping[str, Any
 
     suite_names = sorted({episode["task_suite"] for episode in episodes})
     suite_summaries = {
-        suite_name: _summarize_subset(
-            [episode for episode in episodes if episode["task_suite"] == suite_name]
-        )
+        suite_name: _summarize_subset([episode for episode in episodes if episode["task_suite"] == suite_name])
         for suite_name in suite_names
     }
 
@@ -514,9 +453,7 @@ def write_result_summary(
 def _summarize_subset(episodes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     total_episodes = len(episodes)
     successful_episodes = sum(1 for episode in episodes if episode["success"])
-    success_decision_steps = [
-        int(episode["decision_steps"]) for episode in episodes if episode["success"]
-    ]
+    success_decision_steps = [int(episode["decision_steps"]) for episode in episodes if episode["success"]]
     all_decision_steps = [int(episode["decision_steps"]) for episode in episodes]
     all_control_steps = [int(episode["control_steps"]) for episode in episodes]
 
@@ -556,12 +493,9 @@ def _serialize_config(config: Any) -> dict[str, Any]:
     if isinstance(config, Mapping):
         return dict(config)
     if hasattr(config, "__dict__"):
-        return {
-            key: value
-            for key, value in vars(config).items()
-            if not key.startswith("_")
-        }
+        return {key: value for key, value in vars(config).items() if not key.startswith("_")}
     return {"repr": repr(config)}
+
 
 # --- migrated from src/prism/benchmarks/libero/runner.py ---
 import asyncio
@@ -573,15 +507,15 @@ import random
 from typing import Any
 
 import numpy as np
-import websockets
 
 
+from prism.eval.policy_client import PolicyClient, WebSocketPolicyClient
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [0.0]
 LOG = logging.getLogger(__name__)
 
 
-def obs_to_json_dict(
+def build_policy_request(
     obs: Any,
     prompt: str,
     resize_size: int = 448,
@@ -590,7 +524,7 @@ def obs_to_json_dict(
     reset_memory: bool = False,
     executed_actions: list[list[float]] | None = None,
     executed_action_mask: list[bool] | None = None,
-) -> dict[str, Any]:
+) -> PolicyRequest:
     _ = resize_size
     return build_request_from_observation(
         obs,
@@ -655,6 +589,7 @@ async def run(
     num_episodes: int | None = None,
     horizon: int | None = None,
     task_suite_name: str,
+    policy_client: PolicyClient | None = None,
 ) -> list[EpisodeResult]:
     from libero.libero import benchmark
 
@@ -677,7 +612,8 @@ async def run(
     total_success_decision_steps = 0
     suite_results: list[EpisodeResult] = []
 
-    async with websockets.connect(server_url, ping_interval=None, ping_timeout=None) as ws:
+    client = policy_client or WebSocketPolicyClient(server_url)
+    async with client:
         LOG.info("===========================Start task suite %s========================", task_suite_name)
 
         for task_id in task_ids:
@@ -723,7 +659,7 @@ async def run(
                     for step in range(max_steps):
                         decision_steps += 1
 
-                        send_data = obs_to_json_dict(
+                        request = build_policy_request(
                             obs,
                             prompt,
                             history=history,
@@ -732,10 +668,9 @@ async def run(
                             executed_actions=last_executed_actions or None,
                             executed_action_mask=last_executed_action_mask or None,
                         )
-                        await ws.send(json.dumps(send_data))
+                        result = await client.infer(request)
                         LOG.debug("[Step %s] Send observation", step)
 
-                        result = await ws.recv()
                         try:
                             actions = parse_action_response(result, horizon=horizon)
                             LOG.debug("[Step %s] received actions (gripper=%s)", step, actions[0][6])
@@ -823,7 +758,9 @@ async def run(
                     else:
                         LOG.info("Task %s | Episode %s: Fail (%s)", task_id, ep + 1, failure_reason)
 
-                LOG.info("========= Task %s Summary: %s/%s Successful =========", task_id + 1, task_success, task_episodes)
+                LOG.info(
+                    "========= Task %s Summary: %s/%s Successful =========", task_id + 1, task_success, task_episodes
+                )
                 total_episodes += task_episodes
             finally:
                 if env is not None:
@@ -872,8 +809,20 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-
 # Compatibility aliases for the flat PrismVLA eval module.
 import sys as _sys
-for _name in ('spec', 'protocol', 'action', 'action_protocol', 'data_protocol', 'observation', 'request_builder', 'history', 'config', 'eval_summary', 'runner'):
+
+for _name in (
+    "spec",
+    "protocol",
+    "action",
+    "action_protocol",
+    "data_protocol",
+    "observation",
+    "request_builder",
+    "history",
+    "config",
+    "eval_summary",
+    "runner",
+):
     _sys.modules[f"{__name__}.{_name}"] = _sys.modules[__name__]

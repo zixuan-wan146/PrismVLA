@@ -9,9 +9,10 @@ __pycache__/
 .venv/
 venv/
 
-# Local agent/editor metadata
+# AI
 .agents/
 .codex/
+AGENTS.md
 
 # Local/generated outputs
 local_data/

@@ -7,7 +7,7 @@ from typing import Protocol
 
 from prism.eval.metadata import build_run_metadata
 from prism.eval.profiles import as_bool, parse_profile_env, print_dry_run, run_with_environment
-from prism.serve.engine import PolicyRequest
+from prism.serve.protocol import PolicyRequest
 
 __all__ = [
     "BenchmarkAdapter",
