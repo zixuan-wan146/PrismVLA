@@ -79,7 +79,7 @@ class DualSourceBridgeAttention(nn.Module):
 
         current_valid_mask = current_valid_mask.to(device=self.device)
         memory_valid_mask = memory_valid_mask.to(device=self.device)
-        if not current_valid_mask.any(dim=1).all():
+        if current_valid_mask.device.type == "cpu" and not current_valid_mask.any(dim=1).all():
             raise ValueError("Every sample must contain at least one valid current-query token")
         action_states = action_states.to(dtype=self.dtype)
         current_features = current_features.to(device=self.device, dtype=self.current_projection.weight.dtype)
@@ -105,18 +105,18 @@ class DualSourceBridgeAttention(nn.Module):
         action_states = action_states + current_update
 
         samples_with_memory = memory_valid_mask.any(dim=1)
-        if samples_with_memory.any():
-            selected_actions = action_states[samples_with_memory]
-            memory_context = self.memory_projection(self.memory_norm(memory_features[samples_with_memory]))
-            memory_update, _ = self.memory_attention(
-                self.action_norm_memory(selected_actions),
-                memory_context,
-                memory_context,
-                key_padding_mask=~memory_valid_mask[samples_with_memory],
-                need_weights=False,
-            )
-            action_states = action_states.clone()
-            action_states[samples_with_memory] = selected_actions + self.memory_gate * memory_update
+        safe_memory_mask = memory_valid_mask.clone()
+        safe_memory_mask[:, 0] |= ~samples_with_memory
+        memory_context = self.memory_projection(self.memory_norm(memory_features))
+        memory_update, _ = self.memory_attention(
+            self.action_norm_memory(action_states),
+            memory_context,
+            memory_context,
+            key_padding_mask=~safe_memory_mask,
+            need_weights=False,
+        )
+        memory_update = memory_update * samples_with_memory[:, None, None].to(dtype=memory_update.dtype)
+        action_states = action_states + self.memory_gate * memory_update
 
         return action_states + self.ffn(self.action_ffn_norm(action_states))
 

@@ -10,11 +10,12 @@ from typing import Any
 import numpy as np
 import pytest
 
+from experiments.calvin.data import CALVIN_DATA_SPEC
 import prism.data.materialization.calvin_abc_v21 as calvin_v21
 from prism.data.materialization.calvin_abc_v21 import CalvinABCContract
 from prism.data.materialization.calvin_abc_v21 import build_calvin_abc_v21_plan
 from prism.data.materialization.calvin_abc_v21 import materialize_calvin_abc_v21
-from prism.data.materialization.libero_v21 import MaterializationError
+from prism.data.materialization.common import MaterializationError
 
 
 pa = pytest.importorskip("pyarrow")
@@ -52,6 +53,7 @@ def test_materializes_permuted_traly_relative_actions_and_preserves_sources(
     output = materialize_calvin_abc_v21(
         plan,
         tmp_path / "complete_calvin_abc",
+        data_spec=CALVIN_DATA_SPEC,
         decode_samples=False,
     )
 
@@ -155,7 +157,13 @@ def test_no_resume_rejects_matching_partial(
     sentinel.write_text("do not touch", encoding="utf-8")
 
     with pytest.raises(FileExistsError, match="refusing to resume partial"):
-        materialize_calvin_abc_v21(plan, output, resume=False, decode_samples=False)
+        materialize_calvin_abc_v21(
+            plan,
+            output,
+            data_spec=CALVIN_DATA_SPEC,
+            resume=False,
+            decode_samples=False,
+        )
 
     assert sentinel.read_text(encoding="utf-8") == "do not touch"
     assert not output.exists()

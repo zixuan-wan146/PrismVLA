@@ -50,13 +50,21 @@ class Qwen35ActionQueryBackbone(nn.Module):
         self._validate_loaded_model()
 
     @classmethod
-    def from_pretrained(cls, config: Qwen35BackboneConfig | None = None) -> "Qwen35ActionQueryBackbone":
+    def from_pretrained(
+        cls,
+        config: Qwen35BackboneConfig | None = None,
+        *,
+        local_files_only: bool | None = None,
+    ) -> "Qwen35ActionQueryBackbone":
         from transformers import AutoConfig, AutoModel, AutoProcessor
 
         config = Qwen35BackboneConfig() if config is None else config
         config.validate()
+        if local_files_only is not None and type(local_files_only) is not bool:
+            raise TypeError("local_files_only override must be a boolean or null")
+        load_local_only = config.local_files_only if local_files_only is None else local_files_only
         dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[config.torch_dtype]
-        hf_config = AutoConfig.from_pretrained(config.model_name, local_files_only=config.local_files_only)
+        hf_config = AutoConfig.from_pretrained(config.model_name, local_files_only=load_local_only)
         if getattr(hf_config, "model_type", None) != "qwen3_5":
             raise ValueError(
                 f"Expected a qwen3_5 checkpoint, got model_type={getattr(hf_config, 'model_type', None)!r}"
@@ -73,14 +81,14 @@ class Qwen35ActionQueryBackbone(nn.Module):
             text_config.mtp_num_hidden_layers = 0
         processor = AutoProcessor.from_pretrained(
             config.model_name,
-            local_files_only=config.local_files_only,
+            local_files_only=load_local_only,
             size={"shortest_edge": config.image_size**2, "longest_edge": config.image_size**2},
         )
         model = AutoModel.from_pretrained(
             config.model_name,
             config=hf_config,
             dtype=dtype,
-            local_files_only=config.local_files_only,
+            local_files_only=load_local_only,
             attn_implementation="sdpa",
         )
         return cls(model=model, processor=processor, config=config)
@@ -160,8 +168,6 @@ class Qwen35ActionQueryBackbone(nn.Module):
         image_outputs = self.model.get_image_features(pixel_values, image_grid_thw, return_dict=True)
         image_features = torch.cat(image_outputs.pooler_output, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
         image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1)
-        if int(image_mask.sum().item()) * inputs_embeds.shape[-1] != image_features.numel():
-            raise ValueError("Image placeholder count does not match Qwen vision feature count")
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features)
 
         batch_size = input_ids.shape[0]

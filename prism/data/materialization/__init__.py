@@ -9,9 +9,9 @@ from prism.data.materialization.calvin_abc_v21 import (
     build_calvin_abc_v21_plan,
     materialize_calvin_abc_v21,
 )
+from prism.data.materialization.common import MaterializationError
 from prism.data.materialization.libero_v21 import IMAGE_TRANSFORMS
 from prism.data.materialization.libero_v21 import LIBERO_SUITES
-from prism.data.materialization.libero_v21 import MaterializationError
 from prism.data.materialization.libero_v21 import MaterializationPlan
 from prism.data.materialization.libero_v21 import VideoEncodingConfig
 from prism.data.materialization.libero_v21 import build_libero_v21_plan

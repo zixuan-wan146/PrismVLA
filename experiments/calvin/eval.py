@@ -34,6 +34,8 @@ CALVIN_ACTION_DIM = 7
 
 
 CALVIN_CONTROL_DIM = 7
+CALVIN_RELATIVE_MOTION_LOW = np.full(6, -1.0, dtype=np.float32)
+CALVIN_RELATIVE_MOTION_HIGH = np.full(6, 1.0, dtype=np.float32)
 
 
 def parse_action_response(
@@ -55,7 +57,13 @@ def to_calvin_action(
 ) -> list[float]:
     if len(action) < control_dim:
         raise ValueError(f"Action dimension {len(action)} is smaller than CALVIN control dim {control_dim}")
-    calvin_action = [float(value) for value in action[:control_dim]]
+    if control_dim != CALVIN_CONTROL_DIM:
+        raise ValueError(f"CALVIN control dim must be {CALVIN_CONTROL_DIM}, got {control_dim}")
+    values = np.asarray(action[:control_dim], dtype=np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("CALVIN action must contain only finite values")
+    values[:6] = np.clip(values[:6], CALVIN_RELATIVE_MOTION_LOW, CALVIN_RELATIVE_MOTION_HIGH)
+    calvin_action = values.astype(np.float64).tolist()
     calvin_action[6] = float(
         decode_gripper_for_environment(
             np.asarray(calvin_action[6], dtype=np.float32),

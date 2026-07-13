@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import hashlib
 import json
 import math
 import os
@@ -14,6 +13,12 @@ from typing import Any, Literal
 import numpy as np
 
 from prism.data.benchmark_contracts import LIBERO_DATASET_NAMES
+from prism.data.materialization.common import MaterializationError
+from prism.data.materialization.common import canonical_json
+from prism.data.materialization.common import file_sha256
+from prism.data.materialization.common import json_sha256
+from prism.data.materialization.common import read_json
+from prism.data.materialization.common import read_jsonl
 
 LIBERO_SUITES = LIBERO_DATASET_NAMES
 LIBERO_FPS = 20
@@ -37,10 +42,6 @@ PARQUET_COLUMNS = (
 )
 
 ImageTransform = Literal["none", "rotate_180"]
-
-
-class MaterializationError(RuntimeError):
-    """Raised when a source or materialized dataset violates the contract."""
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,7 @@ class MaterializationPlan:
 
     @property
     def sha256(self) -> str:
-        return _json_sha256(self.to_dict())
+        return json_sha256(self.to_dict())
 
 
 def build_libero_v21_plan(
@@ -182,7 +183,7 @@ def build_libero_v21_plan(
         source_files.append(
             SourceFilePlan(
                 relative_path=relative_path,
-                sha256=_file_sha256(source_path),
+                sha256=file_sha256(source_path),
                 size_bytes=source_path.stat().st_size,
             )
         )
@@ -317,7 +318,7 @@ def materialize_libero_v21_plan(
     for episode in plan.episodes:
         journal_path = journal_dir / f"episode_{episode.episode_index:06d}.json"
         if journal_path.exists():
-            journal = _read_json(journal_path)
+            journal = read_json(journal_path)
             _validate_episode_journal(
                 staging,
                 journal,
@@ -505,7 +506,7 @@ def _write_parquet_atomic(
     }
     table = table.replace_schema_metadata(
         {
-            b"huggingface": _canonical_json(huggingface_metadata).encode("utf-8"),
+            b"huggingface": canonical_json(huggingface_metadata).encode("utf-8"),
         }
     )
 
@@ -518,7 +519,7 @@ def _write_parquet_atomic(
         raise
     return {
         "kind": "parquet",
-        "sha256": _file_sha256(target),
+        "sha256": file_sha256(target),
         "size_bytes": target.stat().st_size,
         "rows": len(state),
     }
@@ -573,7 +574,7 @@ def _write_video_atomic(
         raise
     return {
         "kind": "video",
-        "sha256": _file_sha256(target),
+        "sha256": file_sha256(target),
         "size_bytes": target.stat().st_size,
         "frames": expected_frames,
         "video_info": video_info,
@@ -592,7 +593,7 @@ def _finalize_metadata(
         journal_path = journal_dir / f"episode_{episode.episode_index:06d}.json"
         if not journal_path.exists():
             raise MaterializationError(f"missing episode journal: {journal_path}")
-        journal = _read_json(journal_path)
+        journal = read_json(journal_path)
         _validate_episode_journal(
             staging_root,
             journal,
@@ -627,7 +628,7 @@ def _finalize_metadata(
         "source_episodes": [episode.to_dict() for episode in plan.episodes],
         "artifacts": [artifact for journal in journals for artifact in journal["artifacts"]],
     }
-    provenance["content_sha256"] = _json_sha256(provenance)
+    provenance["content_sha256"] = json_sha256(provenance)
     _atomic_write_json(meta_dir / "materialization.json", provenance)
 
 
@@ -712,7 +713,7 @@ def _validate_completed_dataset(
         if not path.is_file():
             raise MaterializationError(f"completed dataset is missing metadata: {path}")
 
-    info = _read_json(root / "meta" / "info.json")
+    info = read_json(root / "meta" / "info.json")
     expected_info_fields = {
         "codebase_version": LEROBOT_VERSION,
         "fps": LIBERO_FPS,
@@ -725,14 +726,14 @@ def _validate_completed_dataset(
         if info.get(key) != expected:
             raise MaterializationError(f"metadata info field {key!r} is {info.get(key)!r}, expected {expected!r}")
 
-    provenance = _read_json(root / "meta" / "materialization.json")
+    provenance = read_json(root / "meta" / "materialization.json")
     for key, expected in run_spec.items():
         if provenance.get(key) != expected:
             raise MaterializationError(f"materialization provenance field {key!r} does not match current run")
     recorded_content_hash = provenance.get("content_sha256")
     unhashed = dict(provenance)
     unhashed.pop("content_sha256", None)
-    if recorded_content_hash != _json_sha256(unhashed):
+    if recorded_content_hash != json_sha256(unhashed):
         raise MaterializationError("materialization provenance content_sha256 is invalid")
 
     expected_source_files = [source.to_dict() for source in plan.source_files]
@@ -742,9 +743,9 @@ def _validate_completed_dataset(
     if provenance.get("source_episodes") != expected_source_episodes:
         raise MaterializationError("materialization provenance source_episodes do not match the plan")
 
-    tasks = _read_jsonl(root / "meta" / "tasks.jsonl")
-    episodes = _read_jsonl(root / "meta" / "episodes.jsonl")
-    episode_stats = _read_jsonl(root / "meta" / "episodes_stats.jsonl")
+    tasks = read_jsonl(root / "meta" / "tasks.jsonl")
+    episodes = read_jsonl(root / "meta" / "episodes.jsonl")
+    episode_stats = read_jsonl(root / "meta" / "episodes_stats.jsonl")
     if len(tasks) != len(plan.tasks):
         raise MaterializationError("tasks.jsonl row count does not match the plan")
     if len(episodes) != len(plan.episodes):
@@ -758,7 +759,7 @@ def _validate_completed_dataset(
             raise MaterializationError(f"completed dataset is missing journal: {journal_path}")
         _validate_episode_journal(
             root,
-            _read_json(journal_path),
+            read_json(journal_path),
             episode=episode,
             run_sha256=str(run_spec["run_sha256"]),
         )
@@ -800,7 +801,7 @@ def _validate_episode_journal(
         path = root / relative_path
         if not path.is_file():
             raise MaterializationError(f"episode {episode.episode_index}: missing artifact {relative_path}")
-        if artifact.get("sha256") != _file_sha256(path):
+        if artifact.get("sha256") != file_sha256(path):
             raise MaterializationError(f"episode {episode.episode_index}: checksum mismatch for {relative_path}")
         if artifact.get("size_bytes") != path.stat().st_size:
             raise MaterializationError(f"episode {episode.episode_index}: size mismatch for {relative_path}")
@@ -1080,7 +1081,7 @@ def _initialize_or_validate_staging(
             raise MaterializationError(f"partial materialization is not a directory: {staging}")
         if not run_path.is_file():
             raise MaterializationError(f"partial materialization has no run manifest: {run_path}")
-        recorded = _read_json(run_path)
+        recorded = read_json(run_path)
         if recorded != dict(run_spec):
             raise MaterializationError(f"partial materialization belongs to a different run: {staging}")
         return
@@ -1100,7 +1101,7 @@ def _run_spec(
         "image_transform": plan.image_transform,
         "video_encoding": video_encoding.to_dict(),
     }
-    content["run_sha256"] = _json_sha256(content)
+    content["run_sha256"] = json_sha256(content)
     return content
 
 
@@ -1137,56 +1138,6 @@ def _atomic_write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     text = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
     temp.write_text(text, encoding="utf-8")
     os.replace(temp, path)
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MaterializationError(f"failed to read JSON metadata: {path}") from exc
-    if not isinstance(value, dict):
-        raise MaterializationError(f"JSON metadata must be an object: {path}")
-    return value
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise MaterializationError(f"failed to read JSONL metadata: {path}") from exc
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise MaterializationError(f"{path}:{line_number}: invalid JSONL row") from exc
-        if not isinstance(value, dict):
-            raise MaterializationError(f"{path}:{line_number}: JSONL row must be an object")
-        rows.append(value)
-    return rows
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-
-
-def _json_sha256(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _hf_sequence_feature(dtype: str, length: int) -> dict[str, Any]:

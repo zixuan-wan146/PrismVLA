@@ -28,3 +28,20 @@ def test_to_calvin_action_maps_canonical_open_01_to_environment_sign():
     assert close_below[6] == -1.0
     assert close_at_threshold[6] == -1.0
     assert open_above[6] == 1.0
+
+
+def test_to_calvin_action_clamps_normalized_relative_motion():
+    assert to_calvin_action([-3, -1, -0.5, 0.5, 1, 4, 0.5]) == [
+        -1,
+        -1,
+        -0.5,
+        0.5,
+        1,
+        1,
+        -1.0,
+    ]
+
+
+def test_to_calvin_action_rejects_nonfinite_values():
+    with pytest.raises(ValueError, match="finite"):
+        to_calvin_action([0, 0, float("inf"), 0, 0, 0, 0.5])

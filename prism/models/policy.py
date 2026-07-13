@@ -13,12 +13,54 @@ from prism.models.vlm import PreparedQueryMemoryBatch, Qwen35QueryMemoryEncoder
 
 
 @dataclass(frozen=True)
+class ScalarStatistic:
+    """A reducible scalar represented by its numerator and denominator."""
+
+    numerator: torch.Tensor
+    denominator: torch.Tensor
+
+    @property
+    def value(self) -> torch.Tensor:
+        """Return zero for an empty population and the exact ratio otherwise."""
+
+        return self.numerator / self.denominator.clamp_min(1.0)
+
+
+@dataclass(frozen=True)
+class ActionLossStatistics:
+    """Sufficient statistics for exact accumulation and distributed reduction."""
+
+    loss_sum: torch.Tensor
+    valid_element_count: torch.Tensor
+    metrics: Mapping[str, ScalarStatistic]
+
+    @property
+    def loss(self) -> torch.Tensor:
+        return self.loss_sum / self.valid_element_count.clamp_min(1.0)
+
+    @property
+    def metric_values(self) -> dict[str, torch.Tensor]:
+        return {name: statistic.value for name, statistic in self.metrics.items()}
+
+
+@dataclass(frozen=True)
 class PolicyOutput:
-    """Direct-action prediction, differentiable loss, and detached diagnostics."""
+    """Direct-action prediction plus globally reducible training statistics."""
 
     predicted_actions: torch.Tensor
-    loss: torch.Tensor
-    metrics: Mapping[str, torch.Tensor]
+    loss_statistics: ActionLossStatistics
+
+    @property
+    def loss(self) -> torch.Tensor:
+        """Local masked mean retained for direct, non-distributed callers."""
+
+        return self.loss_statistics.loss
+
+    @property
+    def metrics(self) -> Mapping[str, torch.Tensor]:
+        """Local metric values retained for inspection and unit tests."""
+
+        return self.loss_statistics.metric_values
 
 
 class PrismPolicy(nn.Module):
@@ -55,7 +97,7 @@ class PrismPolicy(nn.Module):
         batch.validate_against(self.architecture, state_dim=self.state_dim)
         predicted_actions = self._predict_actions(batch)
         action_config = self.architecture.action_head
-        loss, metrics = masked_action_l1(
+        statistics = masked_action_l1_statistics(
             predicted_actions,
             batch.target_actions,
             batch.action_valid_mask,
@@ -65,8 +107,7 @@ class PrismPolicy(nn.Module):
         )
         return PolicyOutput(
             predicted_actions=predicted_actions,
-            loss=loss,
-            metrics=metrics,
+            loss_statistics=statistics,
         )
 
     def predict(self, batch: PolicyInferenceBatch) -> torch.Tensor:
@@ -100,7 +141,7 @@ def masked_action_l1(
     gripper_index: int,
     gripper_threshold: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute the exact element-masked direct-action L1 contract."""
+    """Compute a local masked mean for direct, non-training callers."""
 
     if predicted_actions.ndim != 3 or not torch.is_floating_point(predicted_actions):
         raise ValueError("predicted_actions must be a floating tensor with shape [B, horizon, action_dim]")
@@ -108,6 +149,35 @@ def masked_action_l1(
         raise ValueError("target_actions must be floating and match predicted_actions shape")
     if not torch.isfinite(predicted_actions).all() or not torch.isfinite(target_actions).all():
         raise ValueError("predicted_actions and target_actions must be finite")
+
+    statistics = masked_action_l1_statistics(
+        predicted_actions,
+        target_actions,
+        action_valid_mask,
+        action_dim_mask,
+        gripper_index=gripper_index,
+        gripper_threshold=gripper_threshold,
+    )
+    if statistics.valid_element_count.item() <= 0:
+        raise ValueError("masked action L1 requires at least one valid element")
+    return statistics.loss, statistics.metric_values
+
+
+def masked_action_l1_statistics(
+    predicted_actions: torch.Tensor,
+    target_actions: torch.Tensor,
+    action_valid_mask: torch.Tensor,
+    action_dim_mask: torch.Tensor | None,
+    *,
+    gripper_index: int,
+    gripper_threshold: float,
+) -> ActionLossStatistics:
+    """Build sufficient statistics without data-dependent GPU synchronization."""
+
+    if predicted_actions.ndim != 3 or not torch.is_floating_point(predicted_actions):
+        raise ValueError("predicted_actions must be a floating tensor with shape [B, horizon, action_dim]")
+    if target_actions.shape != predicted_actions.shape or not torch.is_floating_point(target_actions):
+        raise ValueError("target_actions must be floating and match predicted_actions shape")
     if action_valid_mask.dtype != torch.bool or action_valid_mask.shape != predicted_actions.shape[:2]:
         raise ValueError("action_valid_mask must be boolean with shape [B, horizon]")
     batch_size, _, action_dim = predicted_actions.shape
@@ -133,11 +203,11 @@ def masked_action_l1(
     action_valid_mask = action_valid_mask.to(device=predicted_actions.device)
     action_dim_mask = action_dim_mask.to(device=predicted_actions.device)
     element_mask = action_valid_mask.unsqueeze(-1) & action_dim_mask.unsqueeze(1)
-    if not element_mask.any():
-        raise ValueError("masked action L1 requires at least one valid element")
 
-    absolute_error = torch.abs(predicted_actions - target_actions)
-    loss = _masked_mean(absolute_error, element_mask)
+    absolute_error = torch.abs(predicted_actions.float() - target_actions.float())
+    element_weights = element_mask.to(dtype=torch.float32)
+    loss_sum = (absolute_error * element_weights).sum()
+    valid_element_count = element_weights.sum()
 
     motion_dimension_mask = action_dim_mask.clone()
     motion_dimension_mask[:, gripper_index] = False
@@ -155,59 +225,51 @@ def masked_action_l1(
     )
 
     gripper_error = absolute_error[..., gripper_index]
+    adjacent_valid = action_valid_mask[:, :-1] & action_valid_mask[:, 1:]
+    adjacent_valid = adjacent_valid & action_dim_mask[:, gripper_index].unsqueeze(1)
+    target_transitions = (target_open[:, :-1] != target_open[:, 1:]) & adjacent_valid
+    predicted_transitions = predicted_open[:, :-1] != predicted_open[:, 1:]
     metrics = {
-        "total_l1": loss.detach(),
-        "motion_l1": _masked_mean_or_zero(absolute_error, motion_element_mask).detach(),
-        "gripper_l1": _masked_mean_or_zero(gripper_error, gripper_element_mask).detach(),
-        "gripper_accuracy": _masked_mean_or_zero(
+        "total_l1": ScalarStatistic(loss_sum.detach(), valid_element_count.detach()),
+        "motion_l1": _scalar_statistic(absolute_error, motion_element_mask),
+        "gripper_l1": _scalar_statistic(gripper_error, gripper_element_mask),
+        "gripper_accuracy": _scalar_statistic(
             (predicted_open == target_open).to(dtype=predicted_actions.dtype),
             gripper_element_mask,
-        ).detach(),
-        "predicted_open_ratio": _masked_mean_or_zero(
+        ),
+        "predicted_open_ratio": _scalar_statistic(
             predicted_open.to(dtype=predicted_actions.dtype),
             gripper_element_mask,
-        ).detach(),
-        "target_open_ratio": _masked_mean_or_zero(
+        ),
+        "target_open_ratio": _scalar_statistic(
             target_open.to(dtype=predicted_actions.dtype),
             gripper_element_mask,
-        ).detach(),
-        "gripper_transition_recall": _gripper_transition_recall(
-            predicted_open,
-            target_open,
-            action_valid_mask,
-            action_dim_mask[:, gripper_index],
-            dtype=predicted_actions.dtype,
-        ).detach(),
+        ),
+        "gripper_transition_recall": _scalar_statistic(
+            (predicted_transitions & target_transitions).to(dtype=predicted_actions.dtype),
+            target_transitions,
+        ),
     }
-    return loss, metrics
+    return ActionLossStatistics(
+        loss_sum=loss_sum,
+        valid_element_count=valid_element_count,
+        metrics=metrics,
+    )
 
 
-def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    weights = mask.to(dtype=values.dtype)
-    return (values * weights).sum() / weights.sum()
+def _scalar_statistic(values: torch.Tensor, mask: torch.Tensor) -> ScalarStatistic:
+    weights = mask.to(dtype=torch.float32)
+    return ScalarStatistic(
+        numerator=(values.float() * weights).sum().detach(),
+        denominator=weights.sum().detach(),
+    )
 
 
-def _masked_mean_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    if not mask.any():
-        return values.new_zeros(())
-    return _masked_mean(values, mask)
-
-
-def _gripper_transition_recall(
-    predicted_open: torch.Tensor,
-    target_open: torch.Tensor,
-    action_valid_mask: torch.Tensor,
-    gripper_dim_valid: torch.Tensor,
-    *,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    adjacent_valid = action_valid_mask[:, :-1] & action_valid_mask[:, 1:] & gripper_dim_valid.unsqueeze(1)
-    target_transitions = (target_open[:, :-1] != target_open[:, 1:]) & adjacent_valid
-    if not target_transitions.any():
-        return torch.zeros((), dtype=dtype, device=predicted_open.device)
-    predicted_transitions = predicted_open[:, :-1] != predicted_open[:, 1:]
-    true_positive = (predicted_transitions & target_transitions).sum()
-    return true_positive.to(dtype=dtype) / target_transitions.sum().to(dtype=dtype)
-
-
-__all__ = ["PolicyOutput", "PrismPolicy", "masked_action_l1"]
+__all__ = [
+    "ActionLossStatistics",
+    "PolicyOutput",
+    "PrismPolicy",
+    "ScalarStatistic",
+    "masked_action_l1",
+    "masked_action_l1_statistics",
+]

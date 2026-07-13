@@ -1,0 +1,68 @@
+experiment:
+  name: calvin_abc_to_d_query_memory_smoke
+  output_dir: ../outputs/prismvla/smoke/calvin
+  seed: 7
+
+model:
+  architecture_config: configs/model/qwen35_query_memory.yaml
+
+data:
+  spec: experiments.calvin.data:CALVIN_DATA_SPEC
+  root: ../benchmarks/calvin/lerobot
+  anchor_stride: 1
+  include_tail: true
+  train_splits: [A, B, C]
+  eval_splits: [D]
+  datasets:
+    - name: calvin_abc
+      path: task_ABC_D_complete
+      weight: 1.0
+      splits: [A, B, C]
+  normalization:
+    group: calvin_abc
+    statistics_path: ../benchmarks/calvin/lerobot/task_ABC_D_complete/statistics.json
+  loader:
+    global_samples_per_epoch: 1
+    batch_size_per_rank: 1
+    num_workers: 0
+    preprocessing_workers: 1
+    pin_memory: true
+    persistent_workers: false
+    drop_last: false
+
+optimization:
+  optimizer: adamw
+  beta1: 0.9
+  beta2: 0.95
+  epsilon: 1.0e-8
+  no_decay_rule: bias_and_low_dimensional
+  language_model:
+    trainable: false
+    learning_rate: null
+    weight_decay: null
+  vision_encoder:
+    trainable: false
+    learning_rate: null
+    weight_decay: null
+  action_queries:
+    trainable: true
+    learning_rate: 1.0e-4
+    weight_decay: 0.0
+  history_qformer:
+    trainable: true
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+  action_head:
+    trainable: true
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+
+trainer:
+  max_steps: 1
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  scheduler: linear_warmup_decay
+  warmup_steps: 0
+  max_grad_norm: 1.0
+  log_interval: 1
+  save_interval: 1

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import prism.training.runner as runner
+from prism.models.policy import ActionLossStatistics, ScalarStatistic
 from prism.training.checkpoint import TrainingProgress
 
 
@@ -26,11 +27,14 @@ class _TinyPolicy(torch.nn.Module):
         prediction = self.weight * batch.float().mean()
         loss = prediction.square()
         return SimpleNamespace(
-            loss=loss,
-            metrics={
-                "total_l1": prediction.detach().abs(),
-                "batch_mean": batch.float().mean(),
-            },
+            loss_statistics=ActionLossStatistics(
+                loss_sum=loss,
+                valid_element_count=loss.new_tensor(1.0),
+                metrics={
+                    "total_l1": ScalarStatistic(prediction.detach().abs(), loss.new_tensor(1.0)),
+                    "batch_mean": ScalarStatistic(batch.float().mean(), loss.new_tensor(1.0)),
+                },
+            )
         )
 
 
@@ -58,16 +62,27 @@ class _CountingScheduler:
 
 
 class _FakeAccelerator:
-    def __init__(self, sync_pattern: list[bool], *, num_processes: int = 1) -> None:
+    def __init__(
+        self,
+        sync_pattern: list[bool],
+        *,
+        num_processes: int = 1,
+        gradient_accumulation_steps: int | None = None,
+    ) -> None:
         self._sync_pattern = sync_pattern
         self._accumulation_index = 0
         self.sync_gradients = False
         self.num_processes = num_processes
+        self.gradient_accumulation_steps = (
+            sync_pattern.index(True) + 1
+            if gradient_accumulation_steps is None
+            else gradient_accumulation_steps
+        )
         self.process_index = 0
         self.device = torch.device("cpu")
         self.optimizer_step_was_skipped = False
         self.clip_calls = 0
-        self.reduce_calls: list[tuple[float, str]] = []
+        self.reduce_calls: list[tuple[torch.Tensor, str]] = []
         self.printed: list[str] = []
 
     @contextmanager
@@ -80,15 +95,19 @@ class _FakeAccelerator:
         yield
 
     def backward(self, loss: torch.Tensor) -> None:
-        loss.backward()
+        (loss / self.gradient_accumulation_steps).backward()
 
     def clip_grad_norm_(self, parameters: Any, max_norm: float) -> torch.Tensor:
         self.clip_calls += 1
         return torch.nn.utils.clip_grad_norm_(parameters, max_norm)
 
     def reduce(self, value: torch.Tensor, *, reduction: str) -> torch.Tensor:
-        self.reduce_calls.append((float(value.item()), reduction))
-        return value
+        self.reduce_calls.append((value.detach().clone(), reduction))
+        if reduction == "sum":
+            return value * self.num_processes
+        if reduction == "mean":
+            return value
+        raise ValueError(f"unsupported fake reduction: {reduction}")
 
     def print(self, message: str) -> None:
         self.printed.append(message)
@@ -96,6 +115,12 @@ class _FakeAccelerator:
 
 def _config(*, max_steps: int, log_interval: int = 100, save_interval: int = 100) -> Any:
     return SimpleNamespace(
+        data=SimpleNamespace(
+            loader=SimpleNamespace(
+                preprocessing_workers=0,
+                pin_memory=False,
+            )
+        ),
         trainer=SimpleNamespace(
             max_steps=max_steps,
             max_grad_norm=1.0,
@@ -137,8 +162,8 @@ def test_gradient_accumulation_steps_optimizer_scheduler_and_reduce_only_at_sync
     assert optimizer.step_calls == 2
     assert scheduler.step_calls == 2
     assert accelerator.clip_calls == 2
-    assert len(accelerator.reduce_calls) == 4
-    assert all(reduction == "mean" for _, reduction in accelerator.reduce_calls)
+    assert len(accelerator.reduce_calls) == 2
+    assert all(reduction == "sum" for _, reduction in accelerator.reduce_calls)
     assert len(accelerator.printed) == 1
     assert json.loads(accelerator.printed[0])["optimizer_step"] == 2
     assert progress == TrainingProgress(
@@ -251,6 +276,60 @@ def test_resume_cursor_skips_deterministic_batches_before_forward() -> None:
     assert progress.virtual_batch_cursor == 2
     assert progress.virtual_sample_cursor == 8
     assert progress.epoch == 3
+
+
+def test_masked_loss_and_metrics_use_global_counts_across_micro_batches() -> None:
+    class _WeightedPolicy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, batch: torch.Tensor) -> SimpleNamespace:
+            target, count, transition_true_positive, transition_positive = batch[0]
+            loss_sum = torch.abs(self.weight - target) * count
+            detached_loss_sum = loss_sum.detach()
+            return SimpleNamespace(
+                loss_statistics=ActionLossStatistics(
+                    loss_sum=loss_sum,
+                    valid_element_count=count,
+                    metrics={
+                        "total_l1": ScalarStatistic(detached_loss_sum, count),
+                        "gripper_transition_recall": ScalarStatistic(
+                            transition_true_positive,
+                            transition_positive,
+                        ),
+                    },
+                )
+            )
+
+    model = _WeightedPolicy()
+    optimizer = _CountingSGD(model.parameters())
+    accelerator = _FakeAccelerator(
+        [False, True],
+        gradient_accumulation_steps=2,
+    )
+
+    runner.run_training_loop(
+        config=_config(max_steps=1, log_interval=1),
+        accelerator=accelerator,
+        model=model,
+        collator=lambda raw: raw,
+        optimizer=optimizer,
+        scheduler=_CountingScheduler(),
+        dataset=[0, 1],
+        dataloader=_loader(
+            [
+                [0.0, 7.0, 0.0, 0.0],
+                [1.0, 56.0, 1.0, 1.0],
+            ],
+            batch_size=1,
+        ),
+    )
+
+    assert model.weight.item() == pytest.approx(1.0 - 0.01 * (7.0 / 63.0))
+    metrics = json.loads(accelerator.printed[0])["metrics"]
+    assert metrics["total_l1"] == pytest.approx(7.0 / 63.0)
+    assert metrics["gripper_transition_recall"] == pytest.approx(1.0)
 
 
 def test_non_boundary_micro_step_resume_is_rejected() -> None:

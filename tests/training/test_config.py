@@ -36,6 +36,9 @@ def test_calvin_config_resolves_contract_and_complete_checkpoint_snapshot(
     assert config.experiment.output_dir == (tmp_path / "outputs" / "run").resolve()
     assert config.model.architecture.action_head.action_hidden_size == 512
     assert config.model.architecture.action_head.num_attention_heads == 8
+    assert config.optimization.language_model.trainable is False
+    assert config.optimization.action_queries.learning_rate == pytest.approx(1.0e-4)
+    assert config.optimization.action_head.weight_decay == pytest.approx(0.01)
     assert config.data.spec is CALVIN_DATA_SPEC
     assert config.data.train_splits == ("A", "B", "C")
     assert config.data.eval_splits == ("D",)
@@ -52,6 +55,8 @@ def test_calvin_config_resolves_contract_and_complete_checkpoint_snapshot(
     assert snapshot == build_checkpoint_snapshot(config)
     assert snapshot["model"]["architecture"]["action_head"]["objective"] == "direct_masked_l1"
     assert snapshot["model"]["architecture"]["action_head"]["action_hidden_size"] == 512
+    assert snapshot["optimization"]["no_decay_rule"] == "bias_and_low_dimensional"
+    assert snapshot["optimization"]["vision_encoder"]["trainable"] is False
     assert snapshot["data"]["data_spec"]["action"][-1]["name"] == "action.gripper_open"
     assert snapshot["data"]["normalization"]["statistics"] == artifact
     assert snapshot["data"]["normalization"]["content_sha256"] == artifact["content_sha256"]
@@ -283,6 +288,34 @@ def test_phase_one_loader_rejects_persistent_workers(tmp_path: Path):
         load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
 
 
+def test_optimization_scope_and_group_values_are_explicit(tmp_path: Path):
+    raw, _ = _project_fixture(tmp_path, benchmark="calvin")
+    raw["optimization"]["language_model"]["learning_rate"] = 1.0e-5
+    with pytest.raises(ValueError, match="must set learning_rate and weight_decay to null when frozen"):
+        load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
+
+    raw, _ = _project_fixture(tmp_path, benchmark="calvin")
+    raw["optimization"]["action_head"]["learning_rate"] = None
+    with pytest.raises(ValueError, match="must set learning_rate and weight_decay when trainable"):
+        load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
+
+    raw, _ = _project_fixture(tmp_path, benchmark="calvin")
+    for name in (
+        "language_model",
+        "vision_encoder",
+        "action_queries",
+        "history_qformer",
+        "action_head",
+    ):
+        raw["optimization"][name] = {
+            "trainable": False,
+            "learning_rate": None,
+            "weight_decay": None,
+        }
+    with pytest.raises(ValueError, match="at least one parameter group trainable"):
+        load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     [
@@ -436,17 +469,49 @@ def _project_fixture(
                 "global_samples_per_epoch": 17,
                 "batch_size_per_rank": 2,
                 "num_workers": 0,
+                "preprocessing_workers": 0,
                 "pin_memory": False,
                 "persistent_workers": False,
                 "drop_last": True,
+            },
+        },
+        "optimization": {
+            "optimizer": "adamw",
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "no_decay_rule": "bias_and_low_dimensional",
+            "language_model": {
+                "trainable": False,
+                "learning_rate": None,
+                "weight_decay": None,
+            },
+            "vision_encoder": {
+                "trainable": False,
+                "learning_rate": None,
+                "weight_decay": None,
+            },
+            "action_queries": {
+                "trainable": True,
+                "learning_rate": 1.0e-4,
+                "weight_decay": 0.0,
+            },
+            "history_qformer": {
+                "trainable": True,
+                "learning_rate": 1.0e-4,
+                "weight_decay": 0.01,
+            },
+            "action_head": {
+                "trainable": True,
+                "learning_rate": 1.0e-4,
+                "weight_decay": 0.01,
             },
         },
         "trainer": {
             "max_steps": 100,
             "gradient_accumulation_steps": 2,
             "mixed_precision": "bf16",
-            "learning_rate": 1.0e-4,
-            "weight_decay": 0.01,
+            "scheduler": "linear_warmup_decay",
             "warmup_steps": 10,
             "max_grad_norm": 1.0,
             "log_interval": 5,

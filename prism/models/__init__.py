@@ -8,10 +8,19 @@ from prism.models.config import (
     PrismArchitectureConfig,
     Qwen35BackboneConfig,
     TemporalContextConfig,
+    architecture_config_from_mapping,
     load_architecture_config,
 )
+from prism.models.factory import build_prism_policy
 from prism.models.history_qformer import HistoryMemoryOutput, HistoryQFormer
-from prism.models.policy import PolicyOutput, PrismPolicy, masked_action_l1
+from prism.models.policy import (
+    ActionLossStatistics,
+    PolicyOutput,
+    PrismPolicy,
+    ScalarStatistic,
+    masked_action_l1,
+    masked_action_l1_statistics,
+)
 from prism.models.query_features import gather_layerwise_action_queries
 from prism.models.query_memory_bridge import DualSourceBridgeAttention, LayerwiseQueryMemoryBridge
 from prism.models.vlm import (
@@ -25,6 +34,7 @@ from prism.models.vlm import (
 
 __all__ = [
     "DualSourceBridgeAttention",
+    "ActionLossStatistics",
     "DirectActionHead",
     "DirectActionHeadConfig",
     "decode_gripper_open",
@@ -33,8 +43,11 @@ __all__ = [
     "HistoryQFormer",
     "HistoryQFormerConfig",
     "LayerwiseQueryMemoryBridge",
+    "architecture_config_from_mapping",
+    "build_prism_policy",
     "load_architecture_config",
     "masked_action_l1",
+    "masked_action_l1_statistics",
     "PolicyBatch",
     "PolicyBatchCollator",
     "PolicyInferenceBatch",
@@ -47,6 +60,7 @@ __all__ = [
     "PreparedQueryMemoryBatch",
     "QueryBackboneOutput",
     "QueryMemoryEncoderOutput",
+    "ScalarStatistic",
     "pack_two_camera_history_features",
     "TemporalContextConfig",
 ]

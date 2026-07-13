@@ -32,6 +32,15 @@ class RawFrame:
 
 
 @dataclass(frozen=True)
+class RawTrainingWindow:
+    """Current state/instruction and its contiguous action target window."""
+
+    state: np.ndarray
+    actions: np.ndarray
+    instruction: str
+
+
+@dataclass(frozen=True)
 class NumericEpisode:
     """All validated numeric rows for one episode, without decoding video."""
 
@@ -133,6 +142,28 @@ class LeRobotDataset:
             actions=actions,
         )
 
+    def read_training_window(self, episode_id: int, start: int, end: int) -> RawTrainingWindow:
+        """Read all numeric values needed by one training sample in one table pass."""
+
+        episode = self._episode(episode_id)
+        start = int(start)
+        end = int(end)
+        if start < 0 or end <= start or end > episode.length:
+            raise IndexError(
+                f"dataset={self.spec.name} episode={episode_id} training range "
+                f"[{start}, {end}) is outside [0, {episode.length})"
+            )
+        table = self._load_table(episode_id)
+        row = table.iloc[start]
+        state = self._assemble_features(row, self.spec.state, label="state")
+        actions = self._assemble_feature_table(table.iloc[start:end], self.spec.action, label="action")
+        instruction = self._instruction(int(row["task_index"]), episode_id=episode_id, frame_index=start)
+        return RawTrainingWindow(
+            state=state,
+            actions=actions,
+            instruction=instruction,
+        )
+
     def read_actions(self, episode_id: int, start: int, end: int) -> np.ndarray:
         episode = self._episode(episode_id)
         start = int(start)
@@ -145,10 +176,7 @@ class LeRobotDataset:
         if start == end:
             return np.zeros((0, self.spec.action_dim), dtype=np.float32)
         table = self._load_table(episode_id)
-        values = [
-            self._assemble_features(table.iloc[index], self.spec.action, label="action") for index in range(start, end)
-        ]
-        return np.stack(values, axis=0).astype(np.float32, copy=False)
+        return self._assemble_feature_table(table.iloc[start:end], self.spec.action, label="action")
 
     def read_images(
         self,
@@ -197,13 +225,22 @@ class LeRobotDataset:
         return output
 
     def read_instruction(self, episode_id: int, frame_index: int) -> str:
-        frame = self.read_numeric_frame(episode_id, frame_index)
+        episode = self._episode(episode_id)
+        frame_index = int(frame_index)
+        if frame_index < 0 or frame_index >= episode.length:
+            raise IndexError(
+                f"dataset={self.spec.name} episode={episode_id} frame={frame_index} is outside [0, {episode.length})"
+            )
+        row = self._load_table(episode_id).iloc[frame_index]
+        return self._instruction(int(row["task_index"]), episode_id=episode_id, frame_index=frame_index)
+
+    def _instruction(self, task_index: int, *, episode_id: int, frame_index: int) -> str:
         try:
-            return self._tasks[frame.task_index]
+            return self._tasks[task_index]
         except KeyError as exc:
             raise KeyError(
                 f"dataset={self.spec.name} episode={episode_id} frame={frame_index} "
-                f"references missing task_index={frame.task_index}"
+                f"references missing task_index={task_index}"
             ) from exc
 
     @property

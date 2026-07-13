@@ -37,12 +37,7 @@ class PolicyBackend(Protocol):
 
 
 class CheckpointPolicyBackend:
-    """Normalize requests and denormalize actions around an already loaded policy.
-
-    Checkpoint metadata supplies the exact training statistics and contracts.
-    Model/Accelerate state loading deliberately remains outside this class: the
-    injected ``loaded_policy`` must already contain the desired weights.
-    """
+    """Verified checkpoint policy with normalization and inference contracts."""
 
     def __init__(
         self,
@@ -53,6 +48,7 @@ class CheckpointPolicyBackend:
         statistics_group: str,
         checkpoint_metadata: CheckpointMetadata,
         checkpoint_path: str | Path,
+        weights_state: str = "injected_loaded_policy",
     ) -> None:
         if not isinstance(data_spec, DataSpec):
             raise TypeError(f"data_spec must be DataSpec, got {type(data_spec).__name__}")
@@ -61,6 +57,8 @@ class CheckpointPolicyBackend:
             raise ValueError("statistics_group must be a non-empty string")
         if not isinstance(checkpoint_metadata, CheckpointMetadata):
             raise TypeError("checkpoint_metadata must be hash-verified CheckpointMetadata")
+        if not isinstance(weights_state, str) or not weights_state:
+            raise ValueError("weights_state must be non-empty text")
 
         architecture = getattr(loaded_policy, "architecture", None)
         if not isinstance(architecture, PrismArchitectureConfig):
@@ -115,9 +113,9 @@ class CheckpointPolicyBackend:
                 "statistics_sha256": checkpoint_metadata.statistics_sha256,
                 "data_spec_sha256": checkpoint_metadata.data_spec_sha256,
                 "architecture_sha256": checkpoint_metadata.architecture_sha256,
-                "checkpoint_path": str(Path(checkpoint_path).expanduser()),
+                "checkpoint_path": str(Path(checkpoint_path).expanduser().resolve()),
                 "device": str(policy_device),
-                "weights_state": "injected_loaded_policy",
+                "weights_state": weights_state,
             }
         )
 
@@ -126,18 +124,59 @@ class CheckpointPolicyBackend:
         cls,
         checkpoint_path: str | Path,
         *,
+        device: str | torch.device | None = None,
+        local_files_only: bool | None = None,
+    ) -> "CheckpointPolicyBackend":
+        """Reconstruct the policy and strictly restore weights from one checkpoint."""
+
+        from prism.serve.loading import load_policy_checkpoint
+
+        loaded = load_policy_checkpoint(
+            checkpoint_path,
+            device=device,
+            local_files_only=local_files_only,
+        )
+        return cls._from_verified_components(
+            checkpoint_path=loaded.checkpoint_path,
+            loaded_policy=loaded.policy,
+            data_spec=loaded.data_spec,
+            statistics_group=loaded.statistics_group,
+            metadata=loaded.metadata,
+            weights_state="verified_checkpoint_manifest",
+        )
+
+    @classmethod
+    def from_loaded_policy(
+        cls,
+        checkpoint_path: str | Path,
+        *,
         loaded_policy: PrismPolicy,
         data_spec: DataSpec,
         statistics_group: str,
     ) -> "CheckpointPolicyBackend":
-        """Build from verified embedded statistics and an injected loaded policy.
-
-        ``read_checkpoint_metadata`` verifies the checkpoint manifest and
-        metadata. It does not load model weights; callers must do that before
-        passing ``loaded_policy`` here.
-        """
+        """Test/advanced path for an externally restored policy instance."""
 
         metadata = read_checkpoint_metadata(checkpoint_path)
+        return cls._from_verified_components(
+            checkpoint_path=checkpoint_path,
+            loaded_policy=loaded_policy,
+            data_spec=data_spec,
+            statistics_group=statistics_group,
+            metadata=metadata,
+            weights_state="injected_loaded_policy",
+        )
+
+    @classmethod
+    def _from_verified_components(
+        cls,
+        *,
+        checkpoint_path: str | Path,
+        loaded_policy: PrismPolicy,
+        data_spec: DataSpec,
+        statistics_group: str,
+        metadata: CheckpointMetadata,
+        weights_state: str,
+    ) -> "CheckpointPolicyBackend":
         snapshot_data = _mapping(
             metadata.resolved_train_snapshot.get("data"),
             "checkpoint snapshot data",
@@ -183,6 +222,7 @@ class CheckpointPolicyBackend:
             statistics_group=statistics_group,
             checkpoint_metadata=metadata,
             checkpoint_path=checkpoint_path,
+            weights_state=weights_state,
         )
 
     @property

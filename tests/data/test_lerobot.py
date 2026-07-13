@@ -121,6 +121,12 @@ def test_reads_numeric_language_and_ordered_video_frames(tmp_path: Path) -> None
         assert frame.timestamp == pytest.approx(0.2)
         assert dataset.read_instruction(0, 2) == "open the drawer"
 
+        window = dataset.read_training_window(0, 1, 4)
+        np.testing.assert_array_equal(window.state, np.arange(8, dtype=np.float32) + 1)
+        np.testing.assert_array_equal(window.actions[0], np.arange(7, dtype=np.float32) + 10)
+        np.testing.assert_array_equal(window.actions[-1], np.arange(7, dtype=np.float32) + 30)
+        assert window.instruction == "open the drawer"
+
         episode = dataset.read_numeric_episode(0)
         assert episode.episode_index == 0
         assert episode.states.shape == (4, 8)

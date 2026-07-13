@@ -20,12 +20,13 @@ from typing import Any
 
 import numpy as np
 
-from prism.data.materialization.libero_v21 import MaterializationError
-from prism.data.materialization.libero_v21 import _canonical_json
-from prism.data.materialization.libero_v21 import _file_sha256
-from prism.data.materialization.libero_v21 import _json_sha256
-from prism.data.materialization.libero_v21 import _read_json
-from prism.data.materialization.libero_v21 import _read_jsonl
+from prism.data.materialization.common import MaterializationError
+from prism.data.materialization.common import canonical_json
+from prism.data.materialization.common import file_sha256
+from prism.data.materialization.common import json_sha256
+from prism.data.materialization.common import read_json
+from prism.data.materialization.common import read_jsonl
+from prism.data.schema import DataSpec
 
 COLLISION_REPOSITORY = "CollisionCode/calvin_abc_d_lerobot_v2.1"
 COLLISION_REVISION = "7e206b2aa210c5166276b8e9777955bfd1a1e8ac"
@@ -200,7 +201,7 @@ class CalvinABCMaterializationPlan:
 
     @cached_property
     def sha256(self) -> str:
-        return _json_sha256(self.to_dict())
+        return json_sha256(self.to_dict())
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,7 @@ def materialize_calvin_abc_v21(
     plan: CalvinABCMaterializationPlan,
     output_root: str | Path,
     *,
+    data_spec: DataSpec,
     resume: bool = True,
     decode_samples: bool = True,
     progress: _PROGRESS | None = None,
@@ -280,7 +282,13 @@ def materialize_calvin_abc_v21(
     if output.exists():
         if not resume:
             raise FileExistsError(f"refusing to overwrite completed dataset: {output}")
-        _validate_completed_run(plan, output, decode_samples=decode_samples, progress=progress)
+        _validate_completed_run(
+            plan,
+            output,
+            data_spec=data_spec,
+            decode_samples=decode_samples,
+            progress=progress,
+        )
         return output
 
     _emit(progress, "loading and validating all Traly numeric rows")
@@ -358,7 +366,7 @@ def materialize_calvin_abc_v21(
                     schema,
                 )
                 data_mode = "generated"
-                data_sha256 = _file_sha256(data_target)
+                data_sha256 = file_sha256(data_target)
 
             videos: list[dict[str, Any]] = []
             for view in TARGET_VIEWS:
@@ -433,6 +441,7 @@ def materialize_calvin_abc_v21(
             staging,
             donor_store,
             schema,
+            data_spec=data_spec,
             decode_samples=decode_samples,
             progress=progress,
         )
@@ -445,7 +454,7 @@ def materialize_calvin_abc_v21(
 
 
 def _validate_target_metadata(root: Path, contract: CalvinABCContract) -> dict[str, Any]:
-    info = _read_json(root / "meta" / "info.json")
+    info = read_json(root / "meta" / "info.json")
     expected = {
         "codebase_version": "v2.1",
         "total_episodes": contract.target_episodes,
@@ -473,9 +482,9 @@ def _validate_target_metadata(root: Path, contract: CalvinABCContract) -> dict[s
         if features.get(view, {}).get("dtype") != "video":
             raise MaterializationError(f"Collision view {view!r} must be a video")
 
-    tasks = _read_jsonl(root / "meta" / "tasks.jsonl")
-    episodes = _read_jsonl(root / "meta" / "episodes.jsonl")
-    stats = _read_jsonl(root / "meta" / "episodes_stats.jsonl")
+    tasks = read_jsonl(root / "meta" / "tasks.jsonl")
+    episodes = read_jsonl(root / "meta" / "episodes.jsonl")
+    stats = read_jsonl(root / "meta" / "episodes_stats.jsonl")
     if len(tasks) != contract.target_tasks:
         raise MaterializationError("Collision task count mismatch")
     if len(episodes) != contract.target_episodes:
@@ -567,7 +576,7 @@ def _validate_collision_tree(
     tree_path = root / ".cache" / "huggingface" / "trees" / f"{COLLISION_REVISION}.json"
     if not tree_path.is_file():
         raise MaterializationError(f"missing pinned Collision tree manifest: {tree_path}")
-    tree = _read_json(tree_path)
+    tree = read_json(tree_path)
     files = tree.get("files")
     if not isinstance(files, Mapping) or not files:
         raise MaterializationError("Collision tree manifest has no files")
@@ -655,7 +664,7 @@ def _validate_collision_tree(
 
     static_paths = tuple(path for path in paths if not path.startswith("data/") and not path.startswith("videos/"))
     return (
-        _file_sha256(tree_path),
+        file_sha256(tree_path),
         artifacts,
         tuple(sorted(data_ids)),
         static_paths,
@@ -702,7 +711,7 @@ def _validate_donor_artifacts(root: Path) -> tuple[SourceArtifact, ...]:
 def _validate_donor_metadata(root: Path, contract: CalvinABCContract) -> tuple[dict[str, Any], ...]:
     pa, pq = _require_pyarrow()
     del pa
-    info = _read_json(root / "meta" / "info.json")
+    info = read_json(root / "meta" / "info.json")
     expected = {
         "codebase_version": "v3.0",
         "total_episodes": contract.donor_episodes,
@@ -846,7 +855,7 @@ def _build_episode_mappings(
                 donor_to_index=int(donor["dataset_to_index"]),
                 length=episode["length"],
                 task=episode["task"],
-                signature_sha256=hashlib.sha256(_canonical_json(signature).encode("utf-8")).hexdigest(),
+                signature_sha256=hashlib.sha256(canonical_json(signature).encode("utf-8")).hexdigest(),
                 data_file_index=int(donor["data/file_index"]),
                 target_task_index=episode["task_index"],
                 target_from_index=episode["from_index"],
@@ -958,7 +967,7 @@ class _DonorStore:
                     action_max=np.max(donor_action, axis=0),
                     action_mean=np.mean(donor_action, axis=0),
                 )
-                signature_sha256 = hashlib.sha256(_canonical_json(signature).encode("utf-8")).hexdigest()
+                signature_sha256 = hashlib.sha256(canonical_json(signature).encode("utf-8")).hexdigest()
                 if signature_sha256 != mapping.signature_sha256:
                     raise MaterializationError(
                         f"Traly numeric rows do not reproduce mapped stats for "
@@ -1132,7 +1141,7 @@ def _validate_episode_journal(
     schema: Any,
 ) -> None:
     _, pq = _require_pyarrow()
-    journal = _read_json(journal_path)
+    journal = read_json(journal_path)
     if journal.get("plan_sha256") != plan.sha256:
         raise MaterializationError(f"journal belongs to another run: {journal_path}")
     if journal.get("mapping") != mapping.to_dict():
@@ -1150,7 +1159,7 @@ def _validate_episode_journal(
         if not table.schema.equals(schema, check_metadata=True):
             raise MaterializationError(f"journaled generated schema differs: {data_path}")
         _validate_episode_table(table, mapping, donor_store)
-        expected_sha = _file_sha256(data_path)
+        expected_sha = file_sha256(data_path)
     else:
         raise MaterializationError(f"journal has invalid data mode: {journal_path}")
     if data.get("sha256") != expected_sha:
@@ -1181,6 +1190,7 @@ def _validate_full_root(
     donor_store: _DonorStore,
     schema: Any,
     *,
+    data_spec: DataSpec,
     decode_samples: bool,
     progress: _PROGRESS | None,
 ) -> dict[str, Any]:
@@ -1221,17 +1231,16 @@ def _validate_full_root(
     if frames != plan.contract.target_frames:
         raise MaterializationError(f"final frame count is {frames}, expected {plan.contract.target_frames}")
 
-    info = _read_json(root / "meta" / "info.json")
+    info = read_json(root / "meta" / "info.json")
     if info.get("total_episodes") != plan.contract.target_episodes:
         raise MaterializationError("final info episode count mismatch")
     if info.get("total_frames") != plan.contract.target_frames:
         raise MaterializationError("final info frame count mismatch")
-    if len(_read_jsonl(root / "meta" / "episodes.jsonl")) != (plan.contract.target_episodes):
+    if len(read_jsonl(root / "meta" / "episodes.jsonl")) != (plan.contract.target_episodes):
         raise MaterializationError("final episodes metadata count mismatch")
 
     decoded: list[dict[str, Any]] = []
     if decode_samples:
-        from experiments.calvin.data import CALVIN_DATA_SPEC
         from prism.data.lerobot import LeRobotDataset
 
         sample_ids = tuple(
@@ -1243,7 +1252,7 @@ def _validate_full_root(
                 )
             )
         )
-        with LeRobotDataset(root, CALVIN_DATA_SPEC, verify_files=True) as dataset:
+        with LeRobotDataset(root, data_spec, verify_files=True) as dataset:
             for episode_id in sample_ids:
                 numeric = dataset.read_numeric_episode(episode_id)
                 if numeric.states.shape[0] != plan.mappings[episode_id].length:
@@ -1274,12 +1283,13 @@ def _validate_completed_run(
     plan: CalvinABCMaterializationPlan,
     output: Path,
     *,
+    data_spec: DataSpec,
     decode_samples: bool,
     progress: _PROGRESS | None,
 ) -> None:
     if output.is_symlink() or not output.is_dir():
         raise MaterializationError(f"completed output is not a real directory: {output}")
-    run = _read_json(output / ".materialization" / "run.json")
+    run = read_json(output / ".materialization" / "run.json")
     if run != _run_spec(plan):
         raise MaterializationError(f"completed output belongs to another plan: {output}")
     donor_store = _DonorStore(plan)
@@ -1290,6 +1300,7 @@ def _validate_completed_run(
         output,
         donor_store,
         schema,
+        data_spec=data_spec,
         decode_samples=decode_samples,
         progress=progress,
     )
@@ -1303,7 +1314,7 @@ def _run_spec(plan: CalvinABCMaterializationPlan) -> dict[str, Any]:
         "target_revision": COLLISION_REVISION,
         "donor_revision": TRALY_REVISION,
     }
-    content["run_sha256"] = _json_sha256(content)
+    content["run_sha256"] = json_sha256(content)
     return content
 
 

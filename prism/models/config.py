@@ -143,12 +143,39 @@ class PrismArchitectureConfig:
 def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
     config_path = Path(path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return architecture_config_from_mapping(raw, label=str(config_path))
+
+
+def architecture_config_from_mapping(
+    value: Mapping[str, Any],
+    *,
+    label: str = "architecture config",
+) -> PrismArchitectureConfig:
+    """Construct an architecture from YAML-style or checkpoint-canonical data."""
+
+    raw = _mapping(value, label)
     if not isinstance(raw, Mapping):
-        raise TypeError(f"Architecture config root must be a mapping: {config_path}")
-    allowed = {"backbone", "history", "temporal", "action_head", "bridge"}
+        raise TypeError(f"{label} root must be a mapping")
+    allowed = {
+        "backbone",
+        "history",
+        "temporal",
+        "action_head",
+        "bridge",
+        "num_bridge_layers",
+        "memory_gate_init",
+    }
     unknown = sorted(str(key) for key in raw if key not in allowed)
     if unknown:
         raise ValueError(f"Unsupported architecture config sections: {unknown}")
+
+    bridge = _mapping(raw.get("bridge"), "bridge")
+    flat_bridge = {key for key in ("num_bridge_layers", "memory_gate_init") if key in raw}
+    if bridge and flat_bridge:
+        raise ValueError("Architecture config cannot mix bridge section and canonical bridge fields")
+    extra_bridge = sorted(set(bridge) - {"num_layers", "memory_gate_init"})
+    if extra_bridge:
+        raise ValueError(f"Unsupported bridge config fields: {extra_bridge}")
 
     backbone = Qwen35BackboneConfig(**_mapping(raw.get("backbone"), "backbone"))
     history = HistoryQFormerConfig(**_mapping(raw.get("history"), "history"))
@@ -157,18 +184,14 @@ def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
         temporal_values["history_capture_offsets"] = tuple(temporal_values["history_capture_offsets"])
     temporal = TemporalContextConfig(**temporal_values)
     action_head = DirectActionHeadConfig(**_mapping(raw.get("action_head"), "action_head"))
-    bridge = _mapping(raw.get("bridge"), "bridge")
     config = PrismArchitectureConfig(
         backbone=backbone,
         history=history,
         temporal=temporal,
         action_head=action_head,
-        num_bridge_layers=int(bridge.get("num_layers", 16)),
-        memory_gate_init=float(bridge.get("memory_gate_init", 0.1)),
+        num_bridge_layers=int(raw.get("num_bridge_layers", bridge.get("num_layers", 16))),
+        memory_gate_init=float(raw.get("memory_gate_init", bridge.get("memory_gate_init", 0.1))),
     )
-    extra_bridge = sorted(set(bridge) - {"num_layers", "memory_gate_init"})
-    if extra_bridge:
-        raise ValueError(f"Unsupported bridge config fields: {extra_bridge}")
     config.validate()
     return config
 

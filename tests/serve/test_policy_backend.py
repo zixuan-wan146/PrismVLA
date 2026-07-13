@@ -21,6 +21,7 @@ from prism.models.batch import PolicyBatchCollator, PolicyInferenceBatch
 from prism.models.config import DirectActionHeadConfig, PrismArchitectureConfig
 from prism.models.vlm import PreparedQueryMemoryBatch
 from prism.serve.backend import CheckpointPolicyBackend
+from prism.serve.loading import LoadedPolicyCheckpoint
 from prism.serve.protocol import PolicyRequest
 from prism.training.checkpoint import CheckpointMetadata, TrainingProgress
 
@@ -223,13 +224,43 @@ def _backend(monkeypatch: pytest.MonkeyPatch):
         return metadata
 
     monkeypatch.setattr("prism.serve.backend.read_checkpoint_metadata", read_metadata)
-    backend = CheckpointPolicyBackend.from_checkpoint(
+    backend = CheckpointPolicyBackend.from_loaded_policy(
         "checkpoints/step-00000001",
         loaded_policy=policy,
         data_spec=CALVIN_DATA_SPEC,
         statistics_group=STATISTICS_GROUP,
     )
     return backend, policy, statistics, seen_paths
+
+
+def test_checkpoint_factory_loads_verified_policy_weights(monkeypatch):
+    statistics = _statistics()
+    architecture = _architecture()
+    metadata = _metadata(statistics, architecture)
+    policy = _LoadedPolicyFixture(architecture, _normalized_prediction(statistics))
+    checkpoint = Path("checkpoint").resolve()
+    observed: list[tuple[Path, str | torch.device | None, bool | None]] = []
+
+    def load(path, *, device, local_files_only):
+        observed.append((Path(path), device, local_files_only))
+        return LoadedPolicyCheckpoint(
+            policy=policy,
+            data_spec=CALVIN_DATA_SPEC,
+            statistics_group=STATISTICS_GROUP,
+            metadata=metadata,
+            checkpoint_path=checkpoint,
+        )
+
+    monkeypatch.setattr("prism.serve.loading.load_policy_checkpoint", load)
+    backend = CheckpointPolicyBackend.from_checkpoint(
+        checkpoint,
+        device="cpu",
+        local_files_only=True,
+    )
+
+    assert observed == [(checkpoint, "cpu", True)]
+    assert backend.metadata["weights_state"] == "verified_checkpoint_manifest"
+    assert backend.metadata["checkpoint_path"] == str(checkpoint)
 
 
 def test_checkpoint_backend_normalizes_predicts_and_denormalizes(monkeypatch):
@@ -313,7 +344,7 @@ def test_checkpoint_factory_rejects_group_and_statistics_hash_drift(monkeypatch)
     )
 
     with pytest.raises(ValueError, match="statistics group"):
-        CheckpointPolicyBackend.from_checkpoint(
+        CheckpointPolicyBackend.from_loaded_policy(
             "checkpoint",
             loaded_policy=policy,
             data_spec=CALVIN_DATA_SPEC,
@@ -326,7 +357,7 @@ def test_checkpoint_factory_rejects_group_and_statistics_hash_drift(monkeypatch)
         lambda path: corrupted,
     )
     with pytest.raises(ValueError, match="content_sha256"):
-        CheckpointPolicyBackend.from_checkpoint(
+        CheckpointPolicyBackend.from_loaded_policy(
             "checkpoint",
             loaded_policy=policy,
             data_spec=CALVIN_DATA_SPEC,
@@ -346,7 +377,7 @@ def test_checkpoint_factory_requires_a_parameter_device(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="at least one parameter"):
-        CheckpointPolicyBackend.from_checkpoint(
+        CheckpointPolicyBackend.from_loaded_policy(
             "checkpoint",
             loaded_policy=policy,
             data_spec=CALVIN_DATA_SPEC,
@@ -365,7 +396,7 @@ def test_checkpoint_factory_rejects_statistics_robot_drift(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="robot_key mismatch"):
-        CheckpointPolicyBackend.from_checkpoint(
+        CheckpointPolicyBackend.from_loaded_policy(
             "checkpoint",
             loaded_policy=policy,
             data_spec=CALVIN_DATA_SPEC,
@@ -384,7 +415,7 @@ def test_checkpoint_factory_rejects_statistics_schema_drift(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="schema hash mismatch"):
-        CheckpointPolicyBackend.from_checkpoint(
+        CheckpointPolicyBackend.from_loaded_policy(
             "checkpoint",
             loaded_policy=policy,
             data_spec=CALVIN_DATA_SPEC,

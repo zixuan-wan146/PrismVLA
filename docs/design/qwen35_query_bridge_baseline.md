@@ -400,11 +400,20 @@ The output projection has no tanh or sigmoid. The baseline does not construct a
 flow-matching, diffusion, noisy-action, timestep, velocity-target, BCE, or
 classification path.
 
-The unresolved architecture values are the action hidden width, attention-head
-count, and feed-forward ratio. The unresolved optimization choices are
-backbone tuning scope, optimizer groups, learning rates, and the final
-checkpoint cadence. These values must be explicit configuration, not source
-constants.
+The accepted first baseline resolves the action hidden width to 512, uses eight
+attention heads, and uses an FFN ratio of four. This keeps a 64-dimensional
+attention head while aligning the action and history widths. The baseline
+freezes the Qwen language model and vision encoder, and trains the learned
+action queries, History Q-Former, Bridge/action stack, and direct action head.
+Every scope, learning rate, weight decay, and checkpoint cadence remains
+explicit in `configs/train/*.yaml`; none is inferred from
+`model.parameters()`.
+
+Training reduces sufficient statistics across every accumulation micro-batch
+and distributed rank before dividing. In particular, masked L1 is the global
+sum of valid element errors divided by the global valid element count, and
+transition recall is global true positives divided by global positives. Empty
+local populations do not receive equal weight.
 
 There is no legacy stage-1/stage-2 training architecture. Freeze schedules, if
 used, are configuration-driven optimization choices rather than separate model

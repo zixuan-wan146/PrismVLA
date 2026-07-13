@@ -105,7 +105,9 @@ class HistoryQFormer(nn.Module):
             raise ValueError("history_step_ages must contain integers")
         if history_valid_mask.dtype != torch.bool:
             raise ValueError("history_valid_mask must be boolean")
-        if torch.any(history_step_ages < 0) or torch.any(history_step_ages > self.config.max_relative_age):
+        if history_step_ages.device.type == "cpu" and (
+            torch.any(history_step_ages < 0) or torch.any(history_step_ages > self.config.max_relative_age)
+        ):
             raise ValueError(f"history_step_ages must be in [0, {self.config.max_relative_age}]")
         if history_token_mask is None:
             history_token_mask = torch.ones(
@@ -137,14 +139,13 @@ class HistoryQFormer(nn.Module):
         context_valid_mask = context_valid_mask.reshape(batch_size, history_count * tokens_per_history)
 
         sample_valid_mask = context_valid_mask.any(dim=1)
-        output_tokens = context.new_zeros(batch_size, self.config.num_memory_tokens, self.config.hidden_size)
-        if sample_valid_mask.any():
-            valid_context = context[sample_valid_mask]
-            valid_context_mask = context_valid_mask[sample_valid_mask]
-            queries = self.memory_queries.unsqueeze(0).expand(valid_context.shape[0], -1, -1)
-            for block in self.blocks:
-                queries = block(queries, valid_context, valid_context_mask)
-            output_tokens[sample_valid_mask] = self.output_norm(queries)
+        safe_context_valid_mask = context_valid_mask.clone()
+        safe_context_valid_mask[:, 0] |= ~sample_valid_mask
+        queries = self.memory_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        for block in self.blocks:
+            queries = block(queries, context, safe_context_valid_mask)
+        output_tokens = self.output_norm(queries)
+        output_tokens = output_tokens * sample_valid_mask[:, None, None].to(dtype=output_tokens.dtype)
 
         memory_valid_mask = sample_valid_mask.unsqueeze(1).expand(-1, self.config.num_memory_tokens).clone()
         return HistoryMemoryOutput(tokens=output_tokens, valid_mask=memory_valid_mask)

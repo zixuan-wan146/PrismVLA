@@ -35,6 +35,17 @@ export PIP_CACHE_DIR=../pip-cache
 export TMPDIR=../tmp
 ```
 
+When the accepted backbone is already cached and the server has no overseas
+network route, force offline resolution so Hugging Face does not spend time on
+remote HEAD retries:
+
+```bash
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+```
+
+Do not enable those variables while initially populating the cache.
+
 Use the official Hugging Face endpoint by default. If it is unstable, set `HF_ENDPOINT=https://hf-mirror.com` for that command. The server network acceleration script may be sourced before overseas downloads, but the pip index should remain explicit:
 
 ```bash

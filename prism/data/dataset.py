@@ -27,9 +27,7 @@ class StorageBackend(Protocol):
 
     def episode_length(self, episode_id: int) -> int: ...
 
-    def read_numeric_frame(self, episode_id: int, frame_index: int) -> Any: ...
-
-    def read_actions(self, episode_id: int, start: int, end: int) -> np.ndarray: ...
+    def read_training_window(self, episode_id: int, start: int, end: int) -> Any: ...
 
     def read_images(
         self,
@@ -37,9 +35,6 @@ class StorageBackend(Protocol):
         frame_indices: Sequence[int],
         views: Sequence[ViewSpec] | None = None,
     ) -> Mapping[str, np.ndarray]: ...
-
-    def read_instruction(self, episode_id: int, frame_index: int) -> str: ...
-
 
 class FeatureNormalizer(Protocol):
     """A bound statistics group that canonicalizes and normalizes raw values."""
@@ -175,18 +170,15 @@ class SingleVLADataset(Dataset[VLASample]):
             current_images[view.name] = current
             history_images[view.name] = np.ascontiguousarray(history)
 
-        raw_frame = self.backend.read_numeric_frame(episode_id, frame_index)
+        valid_end = min(frame_index + self.action_horizon, episode_length)
+        numeric_window = self.backend.read_training_window(episode_id, frame_index, valid_end)
         state = _normalized_vector(
-            self.normalizer.normalize_state(np.asarray(raw_frame.state, dtype=np.float32)),
+            self.normalizer.normalize_state(np.asarray(numeric_window.state, dtype=np.float32)),
             expected_dim=self.spec.state_dim,
             label=(f"dataset={self.name} episode={episode_id} frame={frame_index} normalized state"),
         )
 
-        valid_end = min(frame_index + self.action_horizon, episode_length)
-        raw_actions = np.asarray(
-            self.backend.read_actions(episode_id, frame_index, valid_end),
-            dtype=np.float32,
-        )
+        raw_actions = np.asarray(numeric_window.actions, dtype=np.float32)
         expected_raw_shape = (valid_end - frame_index, self.spec.action_dim)
         if raw_actions.shape != expected_raw_shape:
             raise ValueError(
@@ -209,7 +201,7 @@ class SingleVLADataset(Dataset[VLASample]):
 
         policy_input = PolicyInput(
             benchmark=self.spec.benchmark,
-            prompt=self.backend.read_instruction(episode_id, frame_index),
+            prompt=numeric_window.instruction,
             images_by_view=current_images,
             history_images_by_view=history_images,
             history_step_ages=np.asarray(self.history_step_ages, dtype=np.int32),

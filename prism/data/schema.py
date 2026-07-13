@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 
@@ -241,6 +242,101 @@ class DataSpec:
             source_ranges.append((feature.start, feature.end, feature.name))
 
 
+def data_spec_from_mapping(
+    value: Mapping[str, Any],
+    *,
+    label: str = "DataSpec",
+) -> DataSpec:
+    """Reconstruct a fully validated DataSpec from checkpoint-canonical JSON."""
+
+    root = _strict_mapping(
+        value,
+        label=label,
+        expected={"name", "benchmark", "robot_key", "storage_format", "views", "state", "action", "language"},
+    )
+    views = tuple(
+        ViewSpec(
+            **_strict_mapping(
+                item,
+                label=f"{label}.views[{index}]",
+                expected={"name", "source_key"},
+            )
+        )
+        for index, item in enumerate(_non_empty_sequence(root["views"], label=f"{label}.views"))
+    )
+    state = tuple(
+        FeatureSlice(
+            **_strict_mapping(
+                item,
+                label=f"{label}.state[{index}]",
+                expected={
+                    "name",
+                    "source_key",
+                    "start",
+                    "end",
+                    "normalization",
+                    "temporal_semantics",
+                    "source_encoding",
+                },
+            )
+        )
+        for index, item in enumerate(_non_empty_sequence(root["state"], label=f"{label}.state"))
+    )
+    action = tuple(
+        FeatureSlice(
+            **_strict_mapping(
+                item,
+                label=f"{label}.action[{index}]",
+                expected={
+                    "name",
+                    "source_key",
+                    "start",
+                    "end",
+                    "normalization",
+                    "temporal_semantics",
+                    "source_encoding",
+                },
+            )
+        )
+        for index, item in enumerate(_non_empty_sequence(root["action"], label=f"{label}.action"))
+    )
+    language = LanguageSpec(
+        **_strict_mapping(
+            root["language"],
+            label=f"{label}.language",
+            expected={"source_key", "kind"},
+        )
+    )
+    return DataSpec(
+        name=root["name"],
+        benchmark=root["benchmark"],
+        robot_key=root["robot_key"],
+        storage_format=root["storage_format"],
+        views=views,
+        state=state,
+        action=action,
+        language=language,
+    )
+
+
+def _strict_mapping(value: Any, *, label: str, expected: set[str]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    if any(not isinstance(key, str) for key in value):
+        raise TypeError(f"{label} keys must be strings")
+    missing = sorted(expected - set(value))
+    unknown = sorted(set(value) - expected)
+    if missing or unknown:
+        raise ValueError(f"{label} keys mismatch: missing={missing}, unknown={unknown}")
+    return dict(value)
+
+
+def _non_empty_sequence(value: Any, *, label: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ValueError(f"{label} must be a non-empty sequence")
+    return value
+
+
 @dataclass(frozen=True)
 class VLASample:
     """One normalized model-facing VLA training sample."""
@@ -307,4 +403,5 @@ __all__ = [
     "TemporalSemantics",
     "VLASample",
     "ViewSpec",
+    "data_spec_from_mapping",
 ]

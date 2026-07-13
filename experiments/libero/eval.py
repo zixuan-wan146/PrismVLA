@@ -30,6 +30,8 @@ LIBERO_VIEW_ORDER = ("primary", "wrist")
 LIBERO_STATE_DIM = 8
 LIBERO_ACTION_DIM = 7
 LIBERO_CONTROL_DIM = 7
+LIBERO_MOTION_LOW = np.full(6, -1.0, dtype=np.float32)
+LIBERO_MOTION_HIGH = np.full(6, 1.0, dtype=np.float32)
 
 
 def parse_action_response(
@@ -47,7 +49,13 @@ def parse_action_response(
 def to_libero_action(action: Sequence[float], control_dim: int = LIBERO_CONTROL_DIM) -> list[float]:
     if len(action) < control_dim:
         raise ValueError(f"Action dimension {len(action)} is smaller than LIBERO control dim {control_dim}")
-    libero_action = [float(value) for value in action[:control_dim]]
+    if control_dim != LIBERO_CONTROL_DIM:
+        raise ValueError(f"LIBERO control dim must be {LIBERO_CONTROL_DIM}, got {control_dim}")
+    values = np.asarray(action[:control_dim], dtype=np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("LIBERO action must contain only finite values")
+    values[:6] = np.clip(values[:6], LIBERO_MOTION_LOW, LIBERO_MOTION_HIGH)
+    libero_action = values.astype(np.float64).tolist()
     libero_action[6] = float(
         decode_gripper_for_environment(
             np.asarray(libero_action[6], dtype=np.float32),

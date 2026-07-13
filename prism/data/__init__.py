@@ -16,9 +16,9 @@ from prism.data.dataset import (
     build_vla_dataloader,
     set_data_epoch,
 )
-from prism.data.lerobot import EpisodeMetadata, LeRobotDataset, NumericEpisode, RawFrame
+from prism.data.lerobot import EpisodeMetadata, LeRobotDataset, NumericEpisode, RawFrame, RawTrainingWindow
 from prism.data.normalization import DataSpecNormalizer
-from prism.data.schema import DataSpec, FeatureSlice, LanguageSpec, VLASample, ViewSpec
+from prism.data.schema import DataSpec, FeatureSlice, LanguageSpec, VLASample, ViewSpec, data_spec_from_mapping
 from prism.data.statistics import (
     StatisticsDatasetSource,
     StatisticsPlan,
@@ -43,6 +43,7 @@ __all__ = [
     "MixtureSelection",
     "NumericEpisode",
     "RawFrame",
+    "RawTrainingWindow",
     "SingleVLADataset",
     "StatisticsDatasetSource",
     "StatisticsPlan",
@@ -52,6 +53,7 @@ __all__ = [
     "ViewSpec",
     "build_vla_dataloader",
     "compute_lerobot_statistics",
+    "data_spec_from_mapping",
     "set_data_epoch",
     "validate_benchmark_data_contract",
     "write_lerobot_statistics",

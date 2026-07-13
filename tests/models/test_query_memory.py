@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import pytest
 import torch
 
@@ -7,6 +9,7 @@ from prism.models.config import (
     DirectActionHeadConfig,
     HistoryQFormerConfig,
     PrismArchitectureConfig,
+    architecture_config_from_mapping,
     load_architecture_config,
 )
 from prism.models.history_qformer import HistoryQFormer
@@ -40,11 +43,21 @@ def test_accepted_architecture_config_loads_from_yaml():
     assert config.action_head.gripper_threshold == pytest.approx(0.5)
 
 
-def test_unaccepted_action_policy_dimensions_are_explicitly_unresolved():
+def test_accepted_action_policy_dimensions_are_resolved():
     config = load_architecture_config("configs/model/qwen35_query_memory.yaml")
 
-    with pytest.raises(ValueError, match="not yet accepted"):
-        config.validate_for_policy()
+    config.validate_for_policy()
+    assert config.action_head.action_hidden_size == 512
+    assert config.action_head.num_attention_heads == 8
+    assert config.action_head.ffn_ratio == 4
+
+
+def test_checkpoint_canonical_architecture_round_trips_without_yaml():
+    expected = load_architecture_config("configs/model/qwen35_query_memory.yaml")
+
+    reconstructed = architecture_config_from_mapping(asdict(expected))
+
+    assert reconstructed == expected
 
 
 def test_gather_layerwise_queries_excludes_h0_and_preserves_all_16_levels():

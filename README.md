@@ -5,6 +5,10 @@ PrismVLA is being rebuilt around a compact, layer-wise vision-language-action ar
 The current architecture decisions and tensor contracts are documented in
 [Qwen3.5 Query-Bridge Architecture Baseline](docs/design/qwen35_query_bridge_baseline.md).
 
+The runnable baseline configurations, remote smoke test, checkpoint resume,
+and checkpoint-backed policy server are documented in
+[Training and serving](docs/training.md).
+
 Benchmark runtime contracts remain documented separately:
 
 - [CALVIN contract](docs/benchmarks/calvin_contract.md)

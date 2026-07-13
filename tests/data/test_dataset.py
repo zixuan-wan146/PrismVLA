@@ -14,7 +14,8 @@ from prism.data.schema import ViewSpec
 @dataclass(frozen=True)
 class _RawFrame:
     state: np.ndarray
-    action: np.ndarray
+    actions: np.ndarray
+    instruction: str
 
 
 class FakeBackend:
@@ -30,16 +31,12 @@ class FakeBackend:
     def episode_length(self, episode_id: int) -> int:
         return self.lengths[episode_id]
 
-    def read_numeric_frame(self, episode_id: int, frame_index: int) -> _RawFrame:
-        del episode_id
+    def read_training_window(self, episode_id: int, start: int, end: int) -> _RawFrame:
         return _RawFrame(
-            state=np.arange(8, dtype=np.float32) + frame_index,
-            action=self._action(frame_index),
+            state=np.arange(8, dtype=np.float32) + start,
+            actions=np.stack([self._action(index) for index in range(start, end)], axis=0),
+            instruction=f"episode {episode_id} frame {start}",
         )
-
-    def read_actions(self, episode_id: int, start: int, end: int) -> np.ndarray:
-        del episode_id
-        return np.stack([self._action(index) for index in range(start, end)], axis=0)
 
     def read_images(
         self,
@@ -59,9 +56,6 @@ class FakeBackend:
             )
             for view in requested
         }
-
-    def read_instruction(self, episode_id: int, frame_index: int) -> str:
-        return f"episode {episode_id} frame {frame_index}"
 
     @staticmethod
     def _action(frame_index: int) -> np.ndarray:

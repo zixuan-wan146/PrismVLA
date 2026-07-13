@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import websockets
 
-from prism.serve.backend import PolicyBackend
+from prism.serve.backend import CheckpointPolicyBackend, PolicyBackend
 from prism.serve.protocol import policy_request_from_mapping
 from prism.serve.wire import (
     PROTOCOL_VERSION,
@@ -72,3 +73,28 @@ async def serve(backend: PolicyBackend, *, host: str, port: int) -> None:
         ping_timeout=None,
     ):
         await asyncio.Future()
+
+
+def run_checkpoint_server(
+    checkpoint_path: str | Path,
+    *,
+    host: str,
+    port: int,
+    device: str | None = None,
+    local_files_only: bool | None = None,
+) -> None:
+    """Load one verified checkpoint and serve it through the stable protocol."""
+
+    if not isinstance(host, str) or not host:
+        raise ValueError("host must be non-empty text")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError(f"port must be in [1, 65535], got {port!r}")
+    backend = CheckpointPolicyBackend.from_checkpoint(
+        checkpoint_path,
+        device=device,
+        local_files_only=local_files_only,
+    )
+    asyncio.run(serve(backend, host=host, port=port))
+
+
+__all__ = ["build_server_metadata", "handle_request", "run_checkpoint_server", "serve"]

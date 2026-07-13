@@ -31,12 +31,19 @@ from prism.models.config import PrismArchitectureConfig
 from prism.models.config import load_architecture_config
 
 
-TRAIN_CONFIG_SNAPSHOT_FORMAT = "prism-resolved-train-config-v1"
+TRAIN_CONFIG_SNAPSHOT_FORMAT = "prism-resolved-train-config-v2"
 ORDERED_VIEW_NAMES = ("primary", "wrist")
 STATE_DIM = 8
 ACTION_DIM = 7
 ACTION_MOTION_DIM = 6
 ACTION_OBJECTIVE = "direct_masked_l1"
+OPTIMIZATION_GROUP_NAMES = (
+    "language_model",
+    "vision_encoder",
+    "action_queries",
+    "history_qformer",
+    "action_head",
+)
 
 
 @dataclass(frozen=True)
@@ -70,10 +77,35 @@ class ResolvedNormalizationConfig:
 
 
 @dataclass(frozen=True)
+class ResolvedOptimizationGroupConfig:
+    trainable: bool
+    learning_rate: float | None
+    weight_decay: float | None
+
+
+@dataclass(frozen=True)
+class ResolvedOptimizationConfig:
+    optimizer: str
+    beta1: float
+    beta2: float
+    epsilon: float
+    no_decay_rule: str
+    language_model: ResolvedOptimizationGroupConfig
+    vision_encoder: ResolvedOptimizationGroupConfig
+    action_queries: ResolvedOptimizationGroupConfig
+    history_qformer: ResolvedOptimizationGroupConfig
+    action_head: ResolvedOptimizationGroupConfig
+
+    def named_groups(self) -> tuple[tuple[str, ResolvedOptimizationGroupConfig], ...]:
+        return tuple((name, getattr(self, name)) for name in OPTIMIZATION_GROUP_NAMES)
+
+
+@dataclass(frozen=True)
 class ResolvedLoaderConfig:
     global_samples_per_epoch: int
     batch_size_per_rank: int
     num_workers: int
+    preprocessing_workers: int
     pin_memory: bool
     persistent_workers: bool
     drop_last: bool
@@ -98,8 +130,7 @@ class ResolvedTrainerConfig:
     max_steps: int
     gradient_accumulation_steps: int
     mixed_precision: str
-    learning_rate: float
-    weight_decay: float
+    scheduler: str
     warmup_steps: int
     max_grad_norm: float
     log_interval: int
@@ -125,6 +156,7 @@ class ResolvedTrainConfig:
     experiment: ResolvedExperimentConfig
     model: ResolvedModelConfig
     data: ResolvedDataConfig
+    optimization: ResolvedOptimizationConfig
     trainer: ResolvedTrainerConfig
     temporal: TemporalTrainingContract
 
@@ -176,7 +208,7 @@ def load_train_config(
     top = _strict_mapping(
         raw,
         label="training config",
-        required={"experiment", "model", "data", "trainer"},
+        required={"experiment", "model", "data", "optimization", "trainer"},
     )
     experiment_raw = _strict_mapping(
         top["experiment"],
@@ -214,9 +246,22 @@ def load_train_config(
             "global_samples_per_epoch",
             "batch_size_per_rank",
             "num_workers",
+            "preprocessing_workers",
             "pin_memory",
             "persistent_workers",
             "drop_last",
+        },
+    )
+    optimization_raw = _strict_mapping(
+        top["optimization"],
+        label="optimization",
+        required={
+            "optimizer",
+            "beta1",
+            "beta2",
+            "epsilon",
+            "no_decay_rule",
+            *OPTIMIZATION_GROUP_NAMES,
         },
     )
     trainer_raw = _strict_mapping(
@@ -226,8 +271,7 @@ def load_train_config(
             "max_steps",
             "gradient_accumulation_steps",
             "mixed_precision",
-            "learning_rate",
-            "weight_decay",
+            "scheduler",
             "warmup_steps",
             "max_grad_norm",
             "log_interval",
@@ -310,6 +354,10 @@ def load_train_config(
             loader_raw["num_workers"],
             "data.loader.num_workers",
         ),
+        preprocessing_workers=_zero_or_one(
+            loader_raw["preprocessing_workers"],
+            "data.loader.preprocessing_workers",
+        ),
         pin_memory=_boolean(loader_raw["pin_memory"], "data.loader.pin_memory"),
         persistent_workers=_boolean(
             loader_raw["persistent_workers"],
@@ -354,6 +402,30 @@ def load_train_config(
         content_sha256=str(statistics["content_sha256"]),
     )
 
+    optimization_groups = {
+        name: _resolve_optimization_group(
+            optimization_raw[name],
+            label=f"optimization.{name}",
+        )
+        for name in OPTIMIZATION_GROUP_NAMES
+    }
+    if not any(group.trainable for group in optimization_groups.values()):
+        raise ValueError("optimization must leave at least one parameter group trainable")
+    optimizer_name = _text(optimization_raw["optimizer"], "optimization.optimizer")
+    if optimizer_name != "adamw":
+        raise ValueError("optimization.optimizer must be exactly 'adamw'")
+    no_decay_rule = _text(optimization_raw["no_decay_rule"], "optimization.no_decay_rule")
+    if no_decay_rule != "bias_and_low_dimensional":
+        raise ValueError("optimization.no_decay_rule must be exactly 'bias_and_low_dimensional'")
+    optimization = ResolvedOptimizationConfig(
+        optimizer=optimizer_name,
+        beta1=_unit_interval(optimization_raw["beta1"], "optimization.beta1"),
+        beta2=_unit_interval(optimization_raw["beta2"], "optimization.beta2"),
+        epsilon=_positive_float(optimization_raw["epsilon"], "optimization.epsilon"),
+        no_decay_rule=no_decay_rule,
+        **optimization_groups,
+    )
+
     trainer = ResolvedTrainerConfig(
         max_steps=_positive_int(trainer_raw["max_steps"], "trainer.max_steps"),
         gradient_accumulation_steps=_positive_int(
@@ -364,14 +436,7 @@ def load_train_config(
             trainer_raw["mixed_precision"],
             "trainer.mixed_precision",
         ),
-        learning_rate=_positive_float(
-            trainer_raw["learning_rate"],
-            "trainer.learning_rate",
-        ),
-        weight_decay=_non_negative_float(
-            trainer_raw["weight_decay"],
-            "trainer.weight_decay",
-        ),
+        scheduler=_text(trainer_raw["scheduler"], "trainer.scheduler"),
         warmup_steps=_non_negative_int(
             trainer_raw["warmup_steps"],
             "trainer.warmup_steps",
@@ -393,6 +458,10 @@ def load_train_config(
         raise ValueError(
             f"trainer.warmup_steps must not exceed trainer.max_steps, got {trainer.warmup_steps} > {trainer.max_steps}"
         )
+    if trainer.mixed_precision not in {"no", "fp16", "bf16"}:
+        raise ValueError("trainer.mixed_precision must be one of: no, fp16, bf16")
+    if trainer.scheduler != "linear_warmup_decay":
+        raise ValueError("trainer.scheduler must be exactly 'linear_warmup_decay'")
 
     return ResolvedTrainConfig(
         source_path=source_path,
@@ -417,6 +486,7 @@ def load_train_config(
             train_splits=train_splits,
             eval_splits=eval_splits,
         ),
+        optimization=optimization,
         trainer=trainer,
         temporal=temporal,
     )
@@ -478,6 +548,7 @@ def build_checkpoint_snapshot(config: ResolvedTrainConfig) -> dict[str, Any]:
             "train_splits": None if config.data.train_splits is None else list(config.data.train_splits),
             "eval_splits": None if config.data.eval_splits is None else list(config.data.eval_splits),
         },
+        "optimization": asdict(config.optimization),
         "trainer": asdict(config.trainer),
         "derived": {
             "temporal_contract": asdict(config.temporal),
@@ -540,6 +611,30 @@ def _validate_dataset_names(
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"data.datasets names must be unique, duplicates: {duplicates}")
+
+
+def _resolve_optimization_group(
+    value: Any,
+    *,
+    label: str,
+) -> ResolvedOptimizationGroupConfig:
+    raw = _strict_mapping(
+        value,
+        label=label,
+        required={"trainable", "learning_rate", "weight_decay"},
+    )
+    trainable = _boolean(raw["trainable"], f"{label}.trainable")
+    learning_rate = _optional_positive_float(raw["learning_rate"], f"{label}.learning_rate")
+    weight_decay = _optional_non_negative_float(raw["weight_decay"], f"{label}.weight_decay")
+    if trainable and (learning_rate is None or weight_decay is None):
+        raise ValueError(f"{label} must set learning_rate and weight_decay when trainable")
+    if not trainable and (learning_rate is not None or weight_decay is not None):
+        raise ValueError(f"{label} must set learning_rate and weight_decay to null when frozen")
+    return ResolvedOptimizationGroupConfig(
+        trainable=trainable,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+    )
 
 
 def _validate_benchmark_data_contract(
@@ -738,6 +833,12 @@ def _non_negative_int(value: Any, label: str) -> int:
     return value
 
 
+def _zero_or_one(value: Any, label: str) -> int:
+    if type(value) is not int or value not in {0, 1}:
+        raise ValueError(f"{label} must be 0 or 1, got {value!r}")
+    return value
+
+
 def _positive_float(value: Any, label: str) -> float:
     parsed = _finite_float(value, label)
     if parsed <= 0.0:
@@ -749,6 +850,21 @@ def _non_negative_float(value: Any, label: str) -> float:
     parsed = _finite_float(value, label)
     if parsed < 0.0:
         raise ValueError(f"{label} must be non-negative, got {value!r}")
+    return parsed
+
+
+def _optional_positive_float(value: Any, label: str) -> float | None:
+    return None if value is None else _positive_float(value, label)
+
+
+def _optional_non_negative_float(value: Any, label: str) -> float | None:
+    return None if value is None else _non_negative_float(value, label)
+
+
+def _unit_interval(value: Any, label: str) -> float:
+    parsed = _finite_float(value, label)
+    if not 0.0 <= parsed < 1.0:
+        raise ValueError(f"{label} must be in [0, 1), got {value!r}")
     return parsed
 
 
@@ -802,6 +918,8 @@ __all__ = [
     "ResolvedLoaderConfig",
     "ResolvedModelConfig",
     "ResolvedNormalizationConfig",
+    "ResolvedOptimizationConfig",
+    "ResolvedOptimizationGroupConfig",
     "ResolvedTrainConfig",
     "ResolvedTrainerConfig",
     "TemporalTrainingContract",

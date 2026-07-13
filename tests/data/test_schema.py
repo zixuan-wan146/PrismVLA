@@ -1,11 +1,11 @@
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 
 import numpy as np
 import pytest
 
 from experiments.calvin.data import CALVIN_DATA_SPEC, CALVIN_EVAL_SPLITS, CALVIN_TRAIN_SPLITS
 from experiments.libero.data import LIBERO_DATA_SPEC
-from prism.data.schema import DataSpec, FeatureSlice, LanguageSpec, VLASample, ViewSpec
+from prism.data.schema import DataSpec, FeatureSlice, LanguageSpec, VLASample, ViewSpec, data_spec_from_mapping
 from prism.schema import PolicyInput
 
 
@@ -179,6 +179,20 @@ def test_data_spec_rejects_overlapping_source_slices() -> None:
 
     with pytest.raises(ValueError, match="source slices overlap"):
         replace(LIBERO_DATA_SPEC, state=(LIBERO_DATA_SPEC.state[0], overlapping))
+
+
+def test_checkpoint_canonical_data_spec_round_trips_without_experiment_imports() -> None:
+    reconstructed = data_spec_from_mapping(asdict(CALVIN_DATA_SPEC))
+
+    assert reconstructed == CALVIN_DATA_SPEC
+
+
+def test_checkpoint_data_spec_rejects_unknown_schema_fields() -> None:
+    payload = asdict(CALVIN_DATA_SPEC)
+    payload["unexpected"] = True
+
+    with pytest.raises(ValueError, match="unknown"):
+        data_spec_from_mapping(payload)
 
 
 def _policy_input() -> PolicyInput:

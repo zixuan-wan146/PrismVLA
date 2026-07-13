@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from experiments.calvin.data import CALVIN_DATA_SPEC
 from prism.data.materialization.calvin_abc_v21 import build_calvin_abc_v21_plan
 from prism.data.materialization.calvin_abc_v21 import materialize_calvin_abc_v21
 
@@ -59,6 +60,7 @@ def main() -> None:
     output = materialize_calvin_abc_v21(
         plan,
         args.output_root,
+        data_spec=CALVIN_DATA_SPEC,
         resume=args.resume,
         decode_samples=True,
         progress=progress,

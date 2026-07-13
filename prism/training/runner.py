@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 from prism.data.dataset import (
@@ -21,11 +20,12 @@ from prism.data.dataset import (
 from prism.data.lerobot import LeRobotDataset
 from prism.data.normalization import DataSpecNormalizer
 from prism.models.batch import PolicyBatch
-from prism.models.history_qformer import HistoryQFormer
-from prism.models.policy import PrismPolicy
-from prism.models.vlm import Qwen35ActionQueryBackbone, Qwen35QueryMemoryEncoder
+from prism.models.factory import build_prism_policy
+from prism.models.policy import ActionLossStatistics, ScalarStatistic
 from prism.training.checkpoint import TrainingProgress, load_checkpoint, save_checkpoint
 from prism.training.config import ResolvedTrainConfig, load_train_config
+from prism.training.optimization import build_optimizer
+from prism.training.preprocessing import iter_preprocessed_batches
 
 
 @dataclass(frozen=True)
@@ -128,29 +128,22 @@ def run_resolved_training(
             dataset,
             batch_size_per_rank=config.data.loader.batch_size_per_rank,
             num_workers=config.data.loader.num_workers,
-            pin_memory=config.data.loader.pin_memory,
+            # Raw VLASample objects contain NumPy arrays, so DataLoader's tensor
+            # pinning cannot see them. Final collated tensors are pinned by the
+            # preprocessing pipeline below.
+            pin_memory=False,
             drop_last=config.data.loader.drop_last,
             seed=config.experiment.seed,
             num_replicas=accelerator.num_processes,
             rank=accelerator.process_index,
         )
 
-        backbone = Qwen35ActionQueryBackbone.from_pretrained(config.model.architecture.backbone)
-        query_memory_encoder = Qwen35QueryMemoryEncoder(
-            backbone,
-            HistoryQFormer(config.model.architecture.history),
-        )
-        model = PrismPolicy(
+        model = build_prism_policy(
             config.model.architecture,
-            query_memory_encoder,
             state_dim=config.data.spec.state_dim,
         )
         collator = model.make_collator()
-        optimizer = AdamW(
-            model.parameters(),
-            lr=config.trainer.learning_rate,
-            weight_decay=config.trainer.weight_decay,
-        )
+        optimizer = build_optimizer(model, config.optimization)
         scheduler = LambdaLR(
             optimizer,
             _LinearWarmupDecay(
@@ -228,8 +221,8 @@ def run_training_loop(
         raise ValueError("accelerator.num_processes must be positive")
 
     optimizer.zero_grad(set_to_none=True)
-    metric_sums: dict[str, torch.Tensor] = {}
-    metric_micro_batches = 0
+    loss_normalizer_sum: torch.Tensor | None = None
+    metric_sums: dict[str, ScalarStatistic] = {}
 
     while completed_steps < config.trainer.max_steps:
         set_data_epoch(dataset, dataloader, epoch)
@@ -259,7 +252,13 @@ def run_training_loop(
             sample_cursor = 0
             continue
 
-        for raw_batch in epoch_iterator:
+        preprocessed_batches = iter_preprocessed_batches(
+            epoch_iterator,
+            collator,
+            preprocessing_workers=config.data.loader.preprocessing_workers,
+            pin_memory=config.data.loader.pin_memory,
+        )
+        for raw_batch, prepared_batch in preprocessed_batches:
             raw_batch_size = _raw_batch_size(raw_batch)
             next_batch_cursor = batch_cursor + 1
             next_sample_cursor = sample_cursor + raw_batch_size * world_size
@@ -271,22 +270,34 @@ def run_training_loop(
 
             with accelerator.accumulate(model):
                 batch = _move_batch_to_device(
-                    collator(raw_batch),
+                    prepared_batch,
                     accelerator.device,
                 )
                 output = model(batch)
-                loss = output.loss
-                if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
-                    raise TypeError("PolicyOutput.loss must be a scalar tensor")
-                accelerator.backward(loss)
-                metric_sums, metric_micro_batches = _accumulate_metrics(
+                statistics = getattr(output, "loss_statistics", None)
+                if not isinstance(statistics, ActionLossStatistics):
+                    raise TypeError("policy output must expose ActionLossStatistics as loss_statistics")
+                _validate_loss_statistics(statistics)
+                accelerator.backward(statistics.loss_sum)
+                loss_normalizer_sum, metric_sums = _accumulate_statistics(
+                    loss_normalizer_sum,
                     metric_sums,
-                    metric_micro_batches,
-                    output.metrics,
+                    statistics,
                 )
                 micro_step += 1
 
                 if accelerator.sync_gradients:
+                    global_loss_normalizer, reduced_metrics = _reduce_statistics(
+                        accelerator,
+                        loss_normalizer_sum,
+                        metric_sums,
+                    )
+                    _normalize_accumulated_gradients(
+                        model.parameters(),
+                        global_loss_normalizer=global_loss_normalizer,
+                        world_size=world_size,
+                        gradient_accumulation_steps=int(accelerator.gradient_accumulation_steps),
+                    )
                     accelerator.clip_grad_norm_(
                         model.parameters(),
                         config.trainer.max_grad_norm,
@@ -299,11 +310,6 @@ def run_training_loop(
                         scheduler.step()
                         completed_steps += 1
 
-                        reduced_metrics = _reduce_metrics(
-                            accelerator,
-                            metric_sums,
-                            metric_micro_batches,
-                        )
                         if (
                             completed_steps % config.trainer.log_interval == 0
                             or completed_steps == config.trainer.max_steps
@@ -333,14 +339,15 @@ def run_training_loop(
                                 config=config,
                                 progress=current_progress,
                             )
+                    loss_normalizer_sum = None
                     metric_sums = {}
-                    metric_micro_batches = 0
 
             epoch = next_epoch
             batch_cursor = next_batch_cursor
             sample_cursor = next_sample_cursor
             if completed_steps >= config.trainer.max_steps or epoch_ended:
                 break
+        preprocessed_batches.close()
 
     return TrainingProgress(
         completed_optimizer_steps=completed_steps,
@@ -410,43 +417,105 @@ def _move_batch_to_device(batch: Any, device: torch.device) -> Any:
     )
 
 
-def _accumulate_metrics(
-    metric_sums: dict[str, torch.Tensor],
-    metric_micro_batches: int,
-    metrics: Mapping[str, torch.Tensor],
-) -> tuple[dict[str, torch.Tensor], int]:
-    if not isinstance(metrics, Mapping) or not metrics:
-        raise TypeError("PolicyOutput.metrics must be a non-empty tensor mapping")
-    parsed: dict[str, torch.Tensor] = {}
-    for name, value in metrics.items():
+def _validate_loss_statistics(statistics: ActionLossStatistics) -> None:
+    if not isinstance(statistics.loss_sum, torch.Tensor) or statistics.loss_sum.ndim != 0:
+        raise TypeError("loss_sum must be a scalar tensor")
+    if not isinstance(statistics.valid_element_count, torch.Tensor) or statistics.valid_element_count.ndim != 0:
+        raise TypeError("valid_element_count must be a scalar tensor")
+    if not isinstance(statistics.metrics, Mapping) or not statistics.metrics:
+        raise TypeError("loss statistics metrics must be a non-empty mapping")
+    for name, statistic in statistics.metrics.items():
         if not isinstance(name, str) or not name:
-            raise TypeError("PolicyOutput metric names must be non-empty strings")
-        if not isinstance(value, torch.Tensor) or value.ndim != 0:
-            raise TypeError(f"PolicyOutput metric {name!r} must be a scalar tensor")
-        parsed[name] = value.detach()
-    if metric_sums and set(parsed) != set(metric_sums):
-        raise ValueError("PolicyOutput metric keys changed within an optimizer step")
-    if not metric_sums:
-        metric_sums = {name: value.clone() for name, value in parsed.items()}
+            raise TypeError("metric names must be non-empty strings")
+        if not isinstance(statistic, ScalarStatistic):
+            raise TypeError(f"metric {name!r} must be a ScalarStatistic")
+        if statistic.numerator.ndim != 0 or statistic.denominator.ndim != 0:
+            raise TypeError(f"metric {name!r} numerator and denominator must be scalar tensors")
+
+
+def _accumulate_statistics(
+    loss_normalizer_sum: torch.Tensor | None,
+    metric_sums: dict[str, ScalarStatistic],
+    statistics: ActionLossStatistics,
+) -> tuple[torch.Tensor, dict[str, ScalarStatistic]]:
+    normalizer = statistics.valid_element_count.detach().float()
+    if loss_normalizer_sum is None:
+        loss_normalizer_sum = normalizer.clone()
     else:
-        metric_sums = {name: metric_sums[name] + value for name, value in parsed.items()}
-    return metric_sums, metric_micro_batches + 1
+        loss_normalizer_sum = loss_normalizer_sum + normalizer
 
-
-def _reduce_metrics(
-    accelerator: Any,
-    metric_sums: Mapping[str, torch.Tensor],
-    metric_micro_batches: int,
-) -> dict[str, torch.Tensor]:
-    if metric_micro_batches <= 0 or not metric_sums:
-        raise RuntimeError("optimizer synchronization has no policy metrics to reduce")
-    return {
-        name: accelerator.reduce(
-            total / metric_micro_batches,
-            reduction="mean",
+    parsed = {
+        name: ScalarStatistic(
+            statistic.numerator.detach().float(),
+            statistic.denominator.detach().float(),
         )
-        for name, total in metric_sums.items()
+        for name, statistic in statistics.metrics.items()
     }
+    if metric_sums and set(parsed) != set(metric_sums):
+        raise ValueError("metric keys changed within an optimizer step")
+    if not metric_sums:
+        metric_sums = {
+            name: ScalarStatistic(
+                statistic.numerator.clone(),
+                statistic.denominator.clone(),
+            )
+            for name, statistic in parsed.items()
+        }
+    else:
+        metric_sums = {
+            name: ScalarStatistic(
+                metric_sums[name].numerator + statistic.numerator,
+                metric_sums[name].denominator + statistic.denominator,
+            )
+            for name, statistic in parsed.items()
+        }
+    return loss_normalizer_sum, metric_sums
+
+
+def _reduce_statistics(
+    accelerator: Any,
+    loss_normalizer_sum: torch.Tensor | None,
+    metric_sums: Mapping[str, ScalarStatistic],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if loss_normalizer_sum is None or not metric_sums:
+        raise RuntimeError("optimizer synchronization has no policy metrics to reduce")
+
+    names = sorted(metric_sums)
+    packed = torch.stack(
+        [loss_normalizer_sum]
+        + [metric_sums[name].numerator for name in names]
+        + [metric_sums[name].denominator for name in names]
+    )
+    reduced = accelerator.reduce(packed, reduction="sum")
+    metric_count = len(names)
+    reduced_metrics = {
+        name: ScalarStatistic(
+            numerator=reduced[1 + index],
+            denominator=reduced[1 + metric_count + index],
+        ).value
+        for index, name in enumerate(names)
+    }
+    return reduced[0], reduced_metrics
+
+
+def _normalize_accumulated_gradients(
+    parameters: Any,
+    *,
+    global_loss_normalizer: torch.Tensor,
+    world_size: int,
+    gradient_accumulation_steps: int,
+) -> None:
+    if world_size <= 0 or gradient_accumulation_steps <= 0:
+        raise ValueError("world size and gradient accumulation steps must be positive")
+    normalizer = float(global_loss_normalizer.detach().cpu().item())
+    if normalizer <= 0.0:
+        raise RuntimeError("global masked loss has no valid action elements")
+
+    gradient_scale = (world_size * gradient_accumulation_steps) / normalizer
+    with torch.no_grad():
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.mul_(gradient_scale)
 
 
 def _log_metrics(

@@ -36,7 +36,7 @@ class PolicyInferenceBatch:
 
         if self.state.ndim != 2 or not torch.is_floating_point(self.state):
             raise ValueError("state must be a floating tensor with shape [B, state_dim]")
-        if not torch.isfinite(self.state).all():
+        if self.state.device.type == "cpu" and not torch.isfinite(self.state).all():
             raise ValueError("state must contain only finite values")
         batch_size = self.state.shape[0]
         if batch_size <= 0:
@@ -97,7 +97,7 @@ class PolicyBatch(PolicyInferenceBatch):
             raise ValueError("target_actions must be a floating tensor with shape [B, horizon, action_dim]")
         if self.target_actions.shape[0] != self.batch_size:
             raise ValueError("state and target_actions batch sizes must match")
-        if not torch.isfinite(self.target_actions).all():
+        if self.target_actions.device.type == "cpu" and not torch.isfinite(self.target_actions).all():
             raise ValueError("target_actions must contain only finite values")
         if self.action_valid_mask.dtype != torch.bool or self.action_valid_mask.shape != self.target_actions.shape[:2]:
             raise ValueError("action_valid_mask must be boolean with shape [B, horizon]")

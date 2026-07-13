@@ -55,16 +55,32 @@ and `1` means open. Both clients apply the strict predicate `prediction > 0.5`, 
 prediction equal to 0.5 is closed. LIBERO maps the decoded value with
 `1 - 2 * open` (`+1=close, -1=open`); CALVIN maps it with `2 * open - 1`
 (`-1=close, +1=open`). There is no `PRISM_CALVIN_GRIPPER_MODE` switch and no action
-autoencoder in the accepted inference path.
+autoencoder in the accepted inference path. After statistical
+de-normalization, each benchmark adapter explicitly clips the first six
+relative motion dimensions to its verified `[-1, 1]` controller input bounds.
+The q01/q99 normalization range is not treated as a physical safety bound.
 
 The server accepts the model-agnostic `PolicyBackend` protocol and includes a
 checkpoint-aware direct implementation, `CheckpointPolicyBackend`. It verifies the
 checkpoint manifest plus architecture, DataSpec, statistics, dataset, robot, and
 request contracts; normalizes raw canonical state with checkpoint-embedded
-statistics; calls the already-loaded `PrismPolicy`; and denormalizes the direct
-`[1, 8, 7]` result. Loading model/Accelerate weights remains the launcher's
-responsibility: the backend requires an already loaded policy and does not claim to
-load weights itself.
+statistics; reconstructs the policy graph from the embedded architecture;
+strictly restores the `Accelerator.save_state` model artifact from the same
+verified checkpoint; and denormalizes the direct `[1, 8, 7]` result. The
+advanced `from_loaded_policy` constructor remains available for tests and
+externally managed deployments, but the normal server path does not accept
+injected weights.
+
+Start the checkpoint-backed server in the model environment:
+
+```bash
+python scripts/serve_policy.py \
+  --checkpoint ../outputs/prismvla/<run>/checkpoints/step-00010000 \
+  --device cuda \
+  --host 127.0.0.1 \
+  --port 9000 \
+  --local-files-only
+```
 
 Run a benchmark client from the repository root. Each script uses its benchmark's
 `configs/eval.yaml` profile by default:

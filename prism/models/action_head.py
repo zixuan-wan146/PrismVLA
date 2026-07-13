@@ -59,7 +59,7 @@ class DirectActionHead(nn.Module):
             raise ValueError(f"state must have shape [B, {self.state_dim}], got {tuple(state.shape)}")
         if not torch.is_floating_point(state):
             raise ValueError("state must be a floating tensor")
-        if not torch.isfinite(state).all():
+        if state.device.type == "cpu" and not torch.isfinite(state).all():
             raise ValueError("state must contain only finite values")
         self._validate_encoder_output(encoder_output, state.shape[0])
 
@@ -127,7 +127,7 @@ def decode_gripper_open(
         raise ValueError("predicted_actions must have an action dimension")
     if gripper_index < 0 or gripper_index >= predicted_actions.shape[-1]:
         raise ValueError("gripper_index is outside the action dimension")
-    if not torch.isfinite(predicted_actions).all():
+    if predicted_actions.device.type == "cpu" and not torch.isfinite(predicted_actions).all():
         raise ValueError("predicted_actions must contain only finite values")
     return predicted_actions[..., gripper_index] > threshold
 

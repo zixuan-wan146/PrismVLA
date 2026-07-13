@@ -18,6 +18,8 @@ from prism.training.config import ResolvedExperimentConfig
 from prism.training.config import ResolvedLoaderConfig
 from prism.training.config import ResolvedModelConfig
 from prism.training.config import ResolvedNormalizationConfig
+from prism.training.config import ResolvedOptimizationConfig
+from prism.training.config import ResolvedOptimizationGroupConfig
 from prism.training.config import ResolvedTrainConfig
 from prism.training.config import ResolvedTrainerConfig
 from prism.training.config import TemporalTrainingContract
@@ -44,6 +46,8 @@ __all__ = [
     "ResolvedLoaderConfig",
     "ResolvedModelConfig",
     "ResolvedNormalizationConfig",
+    "ResolvedOptimizationConfig",
+    "ResolvedOptimizationGroupConfig",
     "ResolvedTrainConfig",
     "ResolvedTrainerConfig",
     "TemporalTrainingContract",
