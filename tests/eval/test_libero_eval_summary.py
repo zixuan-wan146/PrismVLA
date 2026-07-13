@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 
-from prism.eval.libero.eval_summary import (
+from experiments.libero.eval import (
     EpisodeResult,
-    build_run_metadata,
     summarize_episode_results,
     write_result_summary,
 )
+from prism.utils.run_metadata import build_run_metadata
 
 
 def sample_results() -> list[EpisodeResult]:
@@ -57,9 +57,7 @@ def test_summarize_episode_results_reports_overall_and_suite_metrics():
     assert summary["average_success_decision_steps"] == 3.0
     assert summary["suites"]["libero_spatial"]["success_rate"] == 0.5
     assert summary["suites"]["libero_goal"]["success_rate"] == 0.0
-    assert summary["successful_episode_ids"] == [
-        {"task_suite": "libero_spatial", "task_id": 0, "episode_id": 0}
-    ]
+    assert summary["successful_episode_ids"] == [{"task_suite": "libero_spatial", "task_id": 0, "episode_id": 0}]
 
 
 def test_write_result_summary_persists_config_summary_and_episodes(tmp_path):
@@ -107,3 +105,26 @@ def test_build_run_metadata_keeps_safe_environment_and_redacts_secret_like_keys(
         "HF_ENDPOINT": "https://hf-mirror.com",
         "MUJOCO_GL": "osmesa",
     }
+
+
+def test_default_run_metadata_resolves_repository_root(monkeypatch):
+    from pathlib import Path
+
+    import prism.utils.run_metadata as run_metadata
+
+    observed_roots = []
+
+    def fake_git_output(repo_root, *args):
+        observed_roots.append(repo_root)
+        return None
+
+    monkeypatch.setattr(run_metadata, "_git_output", fake_git_output)
+    run_metadata.build_run_metadata(
+        environ={},
+        argv=[],
+        created_at_utc="2026-07-13T00:00:00Z",
+    )
+
+    expected_root = Path(run_metadata.__file__).resolve().parents[2]
+    assert observed_roots
+    assert all(root == expected_root for root in observed_roots)

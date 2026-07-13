@@ -1,0 +1,28 @@
+backbone:
+  model_name: Qwen/Qwen3.5-0.8B
+  num_hidden_layers: 16
+  hidden_size: 1024
+  num_action_queries: 48
+  image_size: 384
+  torch_dtype: bfloat16
+  local_files_only: false
+
+history:
+  input_dim: 1024
+  hidden_size: 512
+  num_layers: 2
+  num_heads: 4
+  mlp_ratio: 4
+  num_memory_tokens: 24
+  num_history_frames: 2
+  max_relative_age: 8
+  dropout: 0.0
+
+temporal:
+  action_horizon: 8
+  replan_stride: 8
+  history_capture_offsets: [2, 5]
+
+bridge:
+  num_layers: 16
+  memory_gate_init: 0.1

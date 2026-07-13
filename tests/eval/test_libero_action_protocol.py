@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from prism.eval.libero.action_protocol import (
+from experiments.libero.eval import (
     parse_action_response,
     to_libero_action,
 )

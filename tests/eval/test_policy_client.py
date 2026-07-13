@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import websockets
 
-from prism.eval.policy_client import InProcessPolicyClient, WebSocketPolicyClient
+from prism.serve.client import InProcessPolicyClient, WebSocketPolicyClient
 from prism.serve.protocol import policy_request_from_mapping
 from prism.serve.wire import (
     metadata_envelope,
@@ -23,6 +23,9 @@ def _request():
             "benchmark": "libero",
             "prompt": "pick up",
             "images_by_view": {"agentview_rgb": np.zeros((1, 1, 3), dtype=np.uint8)},
+            "history_images_by_view": {"agentview_rgb": np.zeros((2, 1, 1, 3), dtype=np.uint8)},
+            "history_step_ages": np.array([6, 3], dtype=np.int32),
+            "history_valid_mask": np.array([False, False]),
             "state": np.zeros(8, dtype=np.float32),
             "action_dim": 7,
             "robot_key": "libero",
@@ -56,6 +59,7 @@ def test_websocket_policy_client_msgpack_numpy_round_trip_and_metadata():
             payload = message["payload"]
             observed["benchmark"] = payload["benchmark"]
             observed["image_dtype"] = str(payload["images_by_view"]["agentview_rgb"].dtype)
+            observed["history_shape"] = tuple(payload["history_images_by_view"]["agentview_rgb"].shape)
             await websocket.send(
                 pack_message(
                     success_envelope(
@@ -79,7 +83,7 @@ def test_websocket_policy_client_msgpack_numpy_round_trip_and_metadata():
             return response, metadata
 
     response, metadata = asyncio.run(run_test())
-    assert observed == {"benchmark": "libero", "image_dtype": "uint8"}
+    assert observed == {"benchmark": "libero", "image_dtype": "uint8", "history_shape": (2, 1, 1, 3)}
     assert metadata == {"action_horizon": 1, "action_dim": 7}
     np.testing.assert_array_equal(response["actions"], np.ones((1, 7), dtype=np.float32))
 

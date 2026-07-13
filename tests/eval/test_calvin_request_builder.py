@@ -2,35 +2,21 @@ from __future__ import annotations
 
 import numpy as np
 
-from prism.eval.calvin.history import CalvinObservationHistory
-from prism.eval.calvin.request_builder import build_request_from_observation
+from experiments.calvin.eval import build_request_from_observation
 
 
-def test_calvin_request_builder_uses_policy_request_contract_with_memory_and_actions():
-    obs0 = _obs(0)
+def test_calvin_request_builder_uses_policy_request_contract():
     obs16 = _obs(16)
-    history = CalvinObservationHistory(max_offset=16)
-    history.record(0, obs0)
-    history.record(16, obs16)
 
-    request = build_request_from_observation(
-        obs16,
-        "open the drawer",
-        history=history,
-        current_step=16,
-        reset_memory=True,
-        executed_actions=[[0.1] * 7],
-        executed_action_mask=[True],
-    )
+    request = build_request_from_observation(obs16, "open the drawer")
 
     assert request.benchmark == "calvin"
     assert sorted(request.images_by_view) == ["image", "wrist_image"]
+    assert tuple(request.history_images_by_view) == ("image", "wrist_image")
+    assert request.history_valid_mask.tolist() == [False, False]
+    assert request.history_step_ages.tolist() == [6, 3]
     np.testing.assert_array_equal(request.state, np.full(8, 16.0, dtype=np.float32))
     assert request.action_dim == 7
-    assert request.reset_memory is True
-    assert request.short_memory_images_by_offset is not None
-    assert 16 in request.short_memory_images_by_offset
-    np.testing.assert_array_equal(request.executed_action_mask, np.array([True]))
 
 
 def test_calvin_request_builder_projects_raw_simulator_state_to_training_layout():

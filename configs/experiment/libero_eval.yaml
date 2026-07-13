@@ -1,9 +1,0 @@
-benchmark: libero
-stage: eval
-dry_run: false
-profile_env: |
-  PRISM_LIBERO_CKPT_NAME=Prism_libero_eval
-  PRISM_LIBERO_LOG_DIR=local_data/eval/libero/logs
-  PRISM_LIBERO_VIDEO_DIR=local_data/eval/libero/videos
-  PRISM_LIBERO_RESULT_FILE=local_data/eval/libero/results.json
-  PRISM_MUJOCO_GL=egl

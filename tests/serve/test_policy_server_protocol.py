@@ -5,23 +5,16 @@ import asyncio
 import numpy as np
 import websockets
 
-from prism.eval.policy_client import WebSocketPolicyClient
+from prism.serve.client import WebSocketPolicyClient
 from prism.serve.protocol import policy_request_from_mapping
 from prism.serve.server import handle_request
 
 
-class _Model:
-    config = {"horizon": 2, "per_action_dim": 7}
-    action_horizon = 2
-    per_action_dim = 7
+class _Backend:
+    metadata = {"action_horizon": 2, "action_dim": 7}
 
-
-class _Engine:
-    model = _Model()
-
-    def infer(self, request, runtime_state):
+    def infer(self, request):
         assert request.benchmark == "libero"
-        assert runtime_state is not None
         return np.zeros((2, 7), dtype=np.float32)
 
 
@@ -31,6 +24,9 @@ def _request():
             "benchmark": "libero",
             "prompt": "pick up",
             "images_by_view": {"agentview_rgb": np.zeros((2, 2, 3), dtype=np.uint8)},
+            "history_images_by_view": {"agentview_rgb": np.zeros((2, 2, 2, 3), dtype=np.uint8)},
+            "history_step_ages": np.array([6, 3], dtype=np.int32),
+            "history_valid_mask": np.array([False, False]),
             "state": np.zeros(8, dtype=np.float32),
             "action_dim": 7,
         }
@@ -39,11 +35,11 @@ def _request():
 
 def test_policy_server_and_client_use_structured_binary_protocol():
     async def run_test():
-        engine = _Engine()
+        backend = _Backend()
         inference_lock = asyncio.Lock()
 
         async def handler(websocket):
-            await handle_request(websocket, engine, inference_lock)
+            await handle_request(websocket, backend, inference_lock)
 
         async with websockets.serve(
             handler,

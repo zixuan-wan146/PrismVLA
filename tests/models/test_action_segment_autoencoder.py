@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from prism.models.planner import (
+from prism.models.action_autoencoder import (
     ActionSegmentAutoencoder,
     ActionSegmentAutoencoderConfig,
     action_segment_autoencoder_loss,

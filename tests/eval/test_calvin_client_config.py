@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-from prism.eval.calvin.config import (
+from experiments.calvin.config import (
     DEFAULT_CALVIN_ROOT,
     CalvinClientConfig,
     configure_calvin_environment,
@@ -16,10 +14,9 @@ def test_default_calvin_config_matches_abc_d_eval_defaults():
     assert config.calvin_root == DEFAULT_CALVIN_ROOT
     assert config.dataset_path == f"{DEFAULT_CALVIN_ROOT}/dataset/task_ABC_D"
     assert config.num_sequences == 1000
-    assert config.horizon == 32
+    assert config.horizon == 8
     assert config.max_steps_per_subtask == 360
-    assert config.gripper_mode == "passthrough"
-    assert config.reset_memory_scope == "sequence"
+    assert config.gripper_mode == "sign"
     assert config.save_video is False
 
 
@@ -53,11 +50,6 @@ def test_calvin_config_can_override_paths_and_counts():
     assert config.gripper_mode == "openvla"
 
 
-def test_invalid_reset_memory_scope_is_rejected():
-    with pytest.raises(ValueError, match="PRISM_CALVIN_RESET_MEMORY_SCOPE"):
-        CalvinClientConfig.from_env({"PRISM_CALVIN_RESET_MEMORY_SCOPE": "episode"})
-
-
 def test_configure_calvin_environment_sets_calvin_root_and_egl_platform():
     config = CalvinClientConfig.from_env({"PRISM_MUJOCO_GL": "egl", "PRISM_CALVIN_ROOT": "local_data/calvin"})
     environ = {}
@@ -67,3 +59,12 @@ def test_configure_calvin_environment_sets_calvin_root_and_egl_platform():
     assert environ["CALVIN_ROOT"] == "local_data/calvin"
     assert environ["MUJOCO_GL"] == "egl"
     assert environ["PYOPENGL_PLATFORM"] == "egl"
+
+
+def test_calvin_rejects_nonbaseline_action_horizon():
+    try:
+        CalvinClientConfig.from_env({"PRISM_CALVIN_HORIZON": "16"})
+    except ValueError as exc:
+        assert "architecture horizon 8" in str(exc)
+    else:
+        raise AssertionError("Expected nonbaseline horizon to raise ValueError")

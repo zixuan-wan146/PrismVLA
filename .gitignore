@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -9,10 +10,9 @@ __pycache__/
 .venv/
 venv/
 
-# AI
+# Local agent/editor metadata
 .agents/
 .codex/
-AGENTS.md
 
 # Local/generated outputs
 local_data/
@@ -25,6 +25,10 @@ swanlab/
 **/bar/
 
 # Large artifacts
+third_party/upstream/
+third_party/starvla/
+third_party/vla-adapter/
+third_party/x-vla/
 *.pt
 *.pth
 *.ckpt

@@ -9,31 +9,21 @@ description = "PrismVLA research code"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "numpy<2",
-  "transformers==4.39.0",
-  "timm==1.0.27",
+  "numpy==1.26.4",
+  "transformers==5.13.1",
   "torch==2.5.1",
   "torchvision==0.20.1",
-  "accelerate==1.13.0",
   "einops==0.8.2",
-  "diffusers==0.38.0",
-  "ninja==1.13.0",
-  "pandas==2.3.3",
-  "matplotlib==3.10.9",
-  "pyarrow==24.0.0",
+  "pillow==12.3.0",
   "PyYAML==6.0.3",
   "websockets==16.0",
-  "msgpack>=1.1,<1.2",
-  "opencv-python==4.10.0.84",
-  "swanlab==0.8.1",
-  "wandb==0.27.2",
-  "av==17.1.0",
-  "fvcore==0.1.5.post20221221",
+  "msgpack==1.1.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest==9.0.3", "ruff==0.15.16"]
-libero = ["libero==0.1.0", "robosuite==1.4.1", "mujoco==3.1.6", "imageio==2.37.0", "huggingface_hub==0.36.0"]
+data = ["pandas==2.3.3", "pyarrow==24.0.0", "h5py==3.16.0", "av==17.1.0"]
+libero = ["libero==0.1.0", "robosuite==1.4.1", "mujoco==3.1.6", "imageio==2.37.0"]
 calvin = []
 
 [tool.setuptools.packages.find]
@@ -59,19 +49,6 @@ ignore = ["E501"]
 "tests/**/*.py" = ["E402"]
 "prism/config.py" = ["E402", "F811"]
 "prism/data/__init__.py" = ["E402", "F811"]
-"prism/data/cache.py" = ["E402", "F811"]
 "prism/data/calvin.py" = ["E402", "F811"]
 "prism/data/libero.py" = ["E402", "F811"]
-"prism/eval/calvin.py" = ["E402", "F811"]
-"prism/eval/libero.py" = ["E402", "F811"]
-"prism/eval/runner.py" = ["E402"]
-"prism/models/action_head.py" = ["E402", "F811"]
-"prism/models/planner.py" = ["E402", "F811"]
-"prism/serve/engine.py" = ["E402", "F811"]
 "prism/serve/server.py" = ["E402"]
-"prism/training/trainer.py" = ["E402", "F811"]
-"prism/training/stage1.py" = ["E402", "F811"]
-"prism/training/stage2_config.py" = ["E402", "F811"]
-"prism/training/stage2_data.py" = ["E402", "F811"]
-"prism/training/stage2_loop.py" = ["E402", "F811"]
-"prism/utils/__init__.py" = ["E402"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from prism.eval.calvin.eval_summary import (
+from experiments.calvin.eval import (
     SequenceResult,
     summarize_sequence_results,
     write_result_summary,

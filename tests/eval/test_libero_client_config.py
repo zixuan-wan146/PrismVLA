@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from prism.eval.libero.config import (
+from experiments.libero.config import (
     DEFAULT_TASK_SUITES,
     LiberoClientConfig,
     align_max_steps,
@@ -13,8 +13,8 @@ def test_default_config_matches_documented_smoke_server():
 
     assert config.server_url == "ws://127.0.0.1:9000"
     assert config.task_suites == DEFAULT_TASK_SUITES
-    assert config.max_steps == [25, 25, 25, 95]
-    assert config.horizon == 32
+    assert config.max_steps == [220, 280, 300, 520]
+    assert config.horizon == 8
     assert config.episode_offset == 0
     assert config.mujoco_gl == "osmesa"
     assert config.result_file == "./log_file/Prism_libero_all_results.json"
@@ -30,6 +30,23 @@ def test_single_max_steps_value_expands_to_all_task_suites():
 
     assert config.task_suites == ["libero_spatial", "libero_goal"]
     assert config.max_steps == [7, 7]
+
+
+def test_task_suite_subset_uses_matching_default_control_budgets():
+    config = LiberoClientConfig.from_env({"PRISM_LIBERO_TASK_SUITES": "libero_goal,libero_spatial"})
+
+    assert config.max_steps == [300, 220]
+
+
+def test_nondefault_task_suite_accepts_an_explicit_control_budget():
+    config = LiberoClientConfig.from_env(
+        {
+            "PRISM_LIBERO_TASK_SUITES": "libero_90",
+            "PRISM_LIBERO_MAX_STEPS": "400",
+        }
+    )
+
+    assert config.max_steps == [400]
 
 
 def test_server_url_prefers_shared_env_var():
@@ -80,6 +97,15 @@ def test_negative_episode_offset_is_rejected():
         assert "PRISM_LIBERO_EPISODE_OFFSET" in str(exc)
     else:
         raise AssertionError("Expected negative episode offset to raise ValueError")
+
+
+def test_nonbaseline_action_horizon_is_rejected():
+    try:
+        LiberoClientConfig.from_env({"PRISM_LIBERO_HORIZON": "4"})
+    except ValueError as exc:
+        assert "architecture horizon 8" in str(exc)
+    else:
+        raise AssertionError("Expected nonbaseline horizon to raise ValueError")
 
 
 def test_configure_mujoco_environment_sets_egl_platform():

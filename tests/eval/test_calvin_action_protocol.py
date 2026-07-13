@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from prism.eval.calvin.action_protocol import parse_action_response, to_calvin_action
+from experiments.calvin.eval import parse_action_response, to_calvin_action
 
 
 def test_parse_action_response_accepts_actions_object_and_horizon_prefix():
@@ -32,3 +32,11 @@ def test_to_calvin_action_passthrough_preserves_gripper():
     action = to_calvin_action([1, 2, 3, 4, 5, 6, -0.7], gripper_mode="passthrough")
 
     assert action == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -0.7]
+
+
+def test_to_calvin_action_defaults_to_valid_binary_gripper_sign():
+    open_action = to_calvin_action([0, 0, 0, 0, 0, 0, 0.0])
+    close_action = to_calvin_action([0, 0, 0, 0, 0, 0, -0.1])
+
+    assert open_action[6] == 1.0
+    assert close_action[6] == -1.0

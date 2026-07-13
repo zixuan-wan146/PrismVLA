@@ -18,16 +18,17 @@ From the repository root, the expected data-disk layout is:
 ├── libero/
 └── calvin/
 local_data/
-├── cache_indices/
-├── token_caches/
-├── checkpoints/
-├── eval/
-└── runs/
+├── checkpoints/action_segment_autoencoder/
+├── datasets/action_segment_autoencoder/
+└── eval/
 ```
 
 The model server runs in the model environment. Benchmark clients run in their own
 Python environments and communicate through the transport-neutral policy client;
-WebSocket is the default cross-process transport.
+WebSocket is the default cross-process transport. Benchmark-specific code lives in
+`experiments/libero` and `experiments/calvin`. Each benchmark keeps parameter parsing
+in `config.py` and the complete simulator/request/rollout/result flow in `eval.py`; only
+the shared wire protocol, client, and sparse-history contract live in `prism/serve`.
 
 The wire protocol follows StarVLA's deployment boundary: MessagePack envelopes,
 native NumPy arrays encoded as dtype/shape/raw bytes, a metadata handshake, and
@@ -36,21 +37,40 @@ do not convert them to JSON lists. WebSocket compression and message-size limits
 are disabled because image bytes are already compact and request validation occurs
 after MessagePack decoding.
 
-Start a trained Prism policy server:
+Every policy request carries the two ordered current views plus explicit sparse
+history. History is keyed by the same ordered view names, with two images per view,
+relative ages `[6, 3]`, and a two-element validity mask. The benchmark client captures
+local action-chunk offsets 2 and 5 and sends them at the next 8-step replan boundary.
+The server remains episode-stateless; initial requests use zero-valued history slots
+with both validity entries false.
+
+LIBERO episode limits are control-step budgets, not policy-request counts. The default
+budgets are 220, 280, 300, and 520 environment steps for `libero_spatial`,
+`libero_object`, `libero_goal`, and `libero_10`, respectively. Open-loop replanning
+does not reduce these benchmark limits.
+
+CALVIN requires its gripper control to be exactly `-1` or `+1`. The client therefore
+uses `PRISM_CALVIN_GRIPPER_MODE=sign` by default. Set `passthrough` only when a policy
+backend already emits those exact discrete values; `openvla` remains available for
+the legacy 0-to-1 convention.
+
+The server accepts a model-agnostic `PolicyBackend`. The old checkpoint-specific
+policy launcher has been removed; the redesigned model will provide its own
+backend and launch entry point without changing benchmark clients.
+
+Run a benchmark client from the repository root. Each script uses its benchmark's
+`configs/eval.yaml` profile by default:
 
 ```bash
-../miniforge3/envs/Evo1/bin/python -m prism.serve.server \
-  --ckpt_dir local_data/checkpoints/POLICY_NAME \
-  --host 127.0.0.1 \
-  --port 9000 \
-  --vlm_local_files_only
+experiments/libero/run_eval.sh
+experiments/calvin/run_eval.sh
 ```
 
-Run a benchmark client from the repository root:
+Pass a profile path as the first argument when using another configuration:
 
 ```bash
-scripts/eval_benchmark.sh libero configs/experiment/libero_eval.yaml
-scripts/eval_benchmark.sh calvin configs/experiment/calvin_eval.yaml
+experiments/libero/run_eval.sh experiments/libero/configs/eval.yaml
+experiments/calvin/run_eval.sh experiments/calvin/configs/eval.yaml
 ```
 
 Use `PRISM_LIBERO_PYTHON` or `PRISM_CALVIN_PYTHON` to override the default
@@ -60,10 +80,32 @@ sibling environment. Use `PRISM_SERVER_URI` to connect to a server other than
 The smoke profiles only validate configuration:
 
 ```bash
-scripts/eval_benchmark.sh libero configs/experiment/libero_smoke.yaml
-scripts/eval_benchmark.sh calvin configs/experiment/calvin_smoke.yaml
+experiments/libero/run_eval.sh experiments/libero/configs/smoke.yaml
+experiments/calvin/run_eval.sh experiments/calvin/configs/smoke.yaml
 ```
 
 A real runtime smoke test must additionally create the simulator, reset a task,
 serialize both camera views and state, exchange one policy request, and execute
 at least one environment step.
+
+The repository includes opt-in runtime integration tests that go further: each
+test runs nine control steps from two eight-action policy responses, verifies the
+second request contains the offset-2 and offset-5 frames, round-trips the full
+request through MessagePack, and asserts that the control-step budget is not
+mistaken for a planning-step budget. Run them in their simulator environments:
+
+```bash
+../envs/libero/bin/python -m pip install pytest==8.3.5
+../envs/calvin/bin/python -m pip install pytest==8.3.5
+```
+
+```bash
+PRISM_RUN_LIBERO_INTEGRATION=1 \
+  ../envs/libero/bin/python -m pytest -q \
+  tests/eval/test_libero_runtime_integration.py
+
+PRISM_RUN_CALVIN_INTEGRATION=1 \
+  PYTHONPATH=.:../benchmarks/calvin/runtime/calvin_env:../benchmarks/calvin/runtime/calvin_models \
+  ../envs/calvin/bin/python -m pytest -q \
+  tests/eval/test_calvin_runtime_integration.py
+```
