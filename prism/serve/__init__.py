@@ -1,4 +1,4 @@
-from prism.serve.backend import PolicyBackend
+from prism.serve.backend import CheckpointPolicyBackend, PolicyBackend
 from prism.serve.client import InProcessPolicyClient, PolicyClient, WebSocketPolicyClient
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.protocol import (
@@ -10,6 +10,7 @@ from prism.serve.protocol import (
 
 __all__ = [
     "InProcessPolicyClient",
+    "CheckpointPolicyBackend",
     "PolicyBackend",
     "PolicyClient",
     "PolicyRequest",

@@ -23,6 +23,16 @@ temporal:
   replan_stride: 8
   history_capture_offsets: [2, 5]
 
+action_head:
+  objective: direct_masked_l1
+  action_dim: 7
+  gripper_index: 6
+  gripper_threshold: 0.5
+  # These research values must be accepted before PrismPolicy is constructed.
+  action_hidden_size: null
+  num_attention_heads: null
+  ffn_ratio: null
+
 bridge:
   num_layers: 16
   memory_gate_init: 0.1

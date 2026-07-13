@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 
+from experiments.libero.data import LIBERO_IMAGE_TRANSFORM
 from experiments.libero.eval import build_request_from_observation
 from experiments.libero.eval import LIBERO_ACTION_DIM, LIBERO_STATE_DIM, LIBERO_VIEW_ORDER
 
 
 def test_libero_protocol_contract():
-    assert LIBERO_VIEW_ORDER == ("agentview_rgb", "eye_in_hand_rgb")
+    assert LIBERO_VIEW_ORDER == ("primary", "wrist")
     assert LIBERO_ACTION_DIM == 7
     assert LIBERO_STATE_DIM == 8
+    assert LIBERO_IMAGE_TRANSFORM == "rotate_180"
 
 
-def test_build_request_from_observation_uses_two_raw_libero_views():
+def test_build_request_from_observation_uses_two_canonical_rotated_views():
     agent = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
     wrist = np.arange(12, 24, dtype=np.uint8).reshape(2, 2, 3)
     obs = {
@@ -27,14 +29,13 @@ def test_build_request_from_observation_uses_two_raw_libero_views():
 
     assert request.prompt == "put the mug away"
     assert request.benchmark == "libero"
-    assert tuple(request.images_by_view) == ("agentview_rgb", "eye_in_hand_rgb")
-    np.testing.assert_array_equal(request.images_by_view["agentview_rgb"], agent)
-    np.testing.assert_array_equal(request.images_by_view["eye_in_hand_rgb"], wrist)
+    assert tuple(request.images_by_view) == ("primary", "wrist")
+    np.testing.assert_array_equal(request.images_by_view["primary"], np.rot90(agent, 2))
+    np.testing.assert_array_equal(request.images_by_view["wrist"], np.rot90(wrist, 2))
+    assert request.images_by_view["primary"].flags.c_contiguous
     assert request.history_valid_mask.tolist() == [False, False]
     assert request.history_step_ages.tolist() == [6, 3]
-    np.testing.assert_array_equal(
-        request.history_images_by_view["agentview_rgb"], np.zeros((2, 2, 2, 3), dtype=np.uint8)
-    )
+    np.testing.assert_array_equal(request.history_images_by_view["primary"], np.zeros((2, 2, 2, 3), dtype=np.uint8))
     assert request.action_dim == 7
     assert request.robot_key == "libero"
     assert request.state.shape == (8,)

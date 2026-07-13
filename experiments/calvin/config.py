@@ -4,9 +4,6 @@ from dataclasses import dataclass
 import os
 from typing import Mapping, MutableMapping
 
-VALID_CALVIN_GRIPPER_MODES = {"openvla", "passthrough", "sign"}
-
-
 DEFAULT_CALVIN_ROOT = "../benchmarks/calvin/runtime"
 DEFAULT_CALVIN_DATASET = f"{DEFAULT_CALVIN_ROOT}/dataset/task_ABC_D"
 
@@ -57,7 +54,6 @@ class CalvinClientConfig:
     sequence_offset: int
     seed: int
     mujoco_gl: str
-    gripper_mode: str
     save_video: bool
     video_fps: int
     show_gui: bool
@@ -85,7 +81,6 @@ class CalvinClientConfig:
             sequence_offset=env_int(environ, "PRISM_CALVIN_SEQUENCE_OFFSET", 0),
             seed=env_int(environ, "PRISM_CALVIN_SEED", 42),
             mujoco_gl=environ.get("PRISM_MUJOCO_GL", "osmesa"),
-            gripper_mode=environ.get("PRISM_CALVIN_GRIPPER_MODE", "sign"),
             save_video=env_bool(environ, "PRISM_CALVIN_SAVE_VIDEO", False),
             video_fps=env_int(environ, "PRISM_CALVIN_VIDEO_FPS", 30),
             show_gui=env_bool(environ, "PRISM_CALVIN_SHOW_GUI", False),
@@ -106,11 +101,6 @@ class CalvinClientConfig:
             raise ValueError(f"PRISM_CALVIN_VIDEO_FPS must be positive, got {self.video_fps}")
         if self.mujoco_gl not in {"osmesa", "egl", "glfw"}:
             raise ValueError(f"PRISM_MUJOCO_GL must be one of osmesa, egl, glfw; got {self.mujoco_gl!r}")
-        if self.gripper_mode not in VALID_CALVIN_GRIPPER_MODES:
-            raise ValueError(
-                "PRISM_CALVIN_GRIPPER_MODE must be one of "
-                f"{sorted(VALID_CALVIN_GRIPPER_MODES)}, got {self.gripper_mode!r}"
-            )
 
 
 def configure_calvin_environment(

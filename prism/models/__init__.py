@@ -1,12 +1,9 @@
 """Reusable model components kept across the PrismVLA redesign."""
 
-from prism.models.action_autoencoder import (
-    ActionSegmentAutoencoder,
-    ActionSegmentAutoencoderConfig,
-    ActionSegmentAutoencoderOutput,
-    action_segment_autoencoder_loss,
-)
+from prism.models.action_head import DirectActionHead, decode_gripper_open
+from prism.models.batch import PolicyBatch, PolicyBatchCollator, PolicyInferenceBatch
 from prism.models.config import (
+    DirectActionHeadConfig,
     HistoryQFormerConfig,
     PrismArchitectureConfig,
     Qwen35BackboneConfig,
@@ -14,6 +11,7 @@ from prism.models.config import (
     load_architecture_config,
 )
 from prism.models.history_qformer import HistoryMemoryOutput, HistoryQFormer
+from prism.models.policy import PolicyOutput, PrismPolicy, masked_action_l1
 from prism.models.query_features import gather_layerwise_action_queries
 from prism.models.query_memory_bridge import DualSourceBridgeAttention, LayerwiseQueryMemoryBridge
 from prism.models.vlm import (
@@ -26,18 +24,23 @@ from prism.models.vlm import (
 )
 
 __all__ = [
-    "ActionSegmentAutoencoder",
-    "ActionSegmentAutoencoderConfig",
-    "ActionSegmentAutoencoderOutput",
-    "action_segment_autoencoder_loss",
     "DualSourceBridgeAttention",
+    "DirectActionHead",
+    "DirectActionHeadConfig",
+    "decode_gripper_open",
     "gather_layerwise_action_queries",
     "HistoryMemoryOutput",
     "HistoryQFormer",
     "HistoryQFormerConfig",
     "LayerwiseQueryMemoryBridge",
     "load_architecture_config",
+    "masked_action_l1",
+    "PolicyBatch",
+    "PolicyBatchCollator",
+    "PolicyInferenceBatch",
+    "PolicyOutput",
     "PrismArchitectureConfig",
+    "PrismPolicy",
     "Qwen35BackboneConfig",
     "Qwen35ActionQueryBackbone",
     "Qwen35QueryMemoryEncoder",

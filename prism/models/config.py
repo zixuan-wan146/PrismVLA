@@ -77,10 +77,51 @@ class TemporalContextConfig:
 
 
 @dataclass(frozen=True)
+class DirectActionHeadConfig:
+    objective: str = "direct_masked_l1"
+    action_dim: int = 7
+    gripper_index: int = 6
+    gripper_threshold: float = 0.5
+    action_hidden_size: int | None = None
+    num_attention_heads: int | None = None
+    ffn_ratio: int | None = None
+
+    def validate(self) -> None:
+        if self.objective != "direct_masked_l1":
+            raise ValueError("The accepted action objective is direct_masked_l1")
+        if self.action_dim != 7 or self.gripper_index != 6:
+            raise ValueError("The accepted action contract is 7-dimensional with gripper at index 6")
+        if self.gripper_threshold != 0.5:
+            raise ValueError("The accepted canonical gripper threshold is exactly 0.5")
+        for name, value in (
+            ("action_hidden_size", self.action_hidden_size),
+            ("num_attention_heads", self.num_attention_heads),
+            ("ffn_ratio", self.ffn_ratio),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive when specified")
+        if (
+            self.action_hidden_size is not None
+            and self.num_attention_heads is not None
+            and self.action_hidden_size % self.num_attention_heads != 0
+        ):
+            raise ValueError("action_hidden_size must be divisible by num_attention_heads")
+
+    def require_resolved(self) -> None:
+        self.validate()
+        missing = [
+            name for name in ("action_hidden_size", "num_attention_heads", "ffn_ratio") if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(f"Action policy dimensions are not yet accepted in the architecture config: {missing}")
+
+
+@dataclass(frozen=True)
 class PrismArchitectureConfig:
     backbone: Qwen35BackboneConfig = field(default_factory=Qwen35BackboneConfig)
     history: HistoryQFormerConfig = field(default_factory=HistoryQFormerConfig)
     temporal: TemporalContextConfig = field(default_factory=TemporalContextConfig)
+    action_head: DirectActionHeadConfig = field(default_factory=DirectActionHeadConfig)
     num_bridge_layers: int = 16
     memory_gate_init: float = 0.1
 
@@ -88,10 +129,15 @@ class PrismArchitectureConfig:
         self.backbone.validate()
         self.history.validate()
         self.temporal.validate()
+        self.action_head.validate()
         if self.num_bridge_layers != self.backbone.num_hidden_layers:
             raise ValueError("Bridge depth must match retained Qwen depth")
         if self.memory_gate_init != 0.1:
             raise ValueError("The accepted memory gate initialization is 0.1")
+
+    def validate_for_policy(self) -> None:
+        self.validate()
+        self.action_head.require_resolved()
 
 
 def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
@@ -99,7 +145,7 @@ def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, Mapping):
         raise TypeError(f"Architecture config root must be a mapping: {config_path}")
-    allowed = {"backbone", "history", "temporal", "bridge"}
+    allowed = {"backbone", "history", "temporal", "action_head", "bridge"}
     unknown = sorted(str(key) for key in raw if key not in allowed)
     if unknown:
         raise ValueError(f"Unsupported architecture config sections: {unknown}")
@@ -110,11 +156,13 @@ def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
     if "history_capture_offsets" in temporal_values:
         temporal_values["history_capture_offsets"] = tuple(temporal_values["history_capture_offsets"])
     temporal = TemporalContextConfig(**temporal_values)
+    action_head = DirectActionHeadConfig(**_mapping(raw.get("action_head"), "action_head"))
     bridge = _mapping(raw.get("bridge"), "bridge")
     config = PrismArchitectureConfig(
         backbone=backbone,
         history=history,
         temporal=temporal,
+        action_head=action_head,
         num_bridge_layers=int(bridge.get("num_layers", 16)),
         memory_gate_init=float(bridge.get("memory_gate_init", 0.1)),
     )

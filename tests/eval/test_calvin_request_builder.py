@@ -11,11 +11,14 @@ def test_calvin_request_builder_uses_policy_request_contract():
     request = build_request_from_observation(obs16, "open the drawer")
 
     assert request.benchmark == "calvin"
-    assert sorted(request.images_by_view) == ["image", "wrist_image"]
-    assert tuple(request.history_images_by_view) == ("image", "wrist_image")
+    assert tuple(request.images_by_view) == ("primary", "wrist")
+    assert tuple(request.history_images_by_view) == ("primary", "wrist")
     assert request.history_valid_mask.tolist() == [False, False]
     assert request.history_step_ages.tolist() == [6, 3]
-    np.testing.assert_array_equal(request.state, np.full(8, 16.0, dtype=np.float32))
+    np.testing.assert_array_equal(
+        request.state,
+        np.asarray([16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 0.0, 16.0], dtype=np.float32),
+    )
     assert request.action_dim == 7
 
 
@@ -27,7 +30,7 @@ def test_calvin_request_builder_projects_raw_simulator_state_to_training_layout(
 
     np.testing.assert_array_equal(
         request.state,
-        np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 14.0], dtype=np.float32),
+        np.array([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 6.0], dtype=np.float32),
     )
 
 

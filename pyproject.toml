@@ -13,6 +13,7 @@ dependencies = [
   "transformers==5.13.1",
   "torch==2.5.1",
   "torchvision==0.20.1",
+  "accelerate==1.13.0",
   "einops==0.8.2",
   "pillow==12.3.0",
   "PyYAML==6.0.3",
@@ -49,6 +50,4 @@ ignore = ["E501"]
 "tests/**/*.py" = ["E402"]
 "prism/config.py" = ["E402", "F811"]
 "prism/data/__init__.py" = ["E402", "F811"]
-"prism/data/calvin.py" = ["E402", "F811"]
-"prism/data/libero.py" = ["E402", "F811"]
 "prism/serve/server.py" = ["E402"]

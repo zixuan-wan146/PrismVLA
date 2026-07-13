@@ -12,7 +12,7 @@ from prism.models.history_qformer import HistoryMemoryOutput, HistoryQFormer
 from prism.models.query_features import gather_layerwise_action_queries
 
 if TYPE_CHECKING:
-    from prism.serve.protocol import PolicyRequest
+    from prism.schema import PolicyInput
 
 
 @dataclass(frozen=True)
@@ -259,7 +259,7 @@ class Qwen35QueryMemoryEncoder(nn.Module):
         self.backbone = backbone
         self.history_qformer = HistoryQFormer() if history_qformer is None else history_qformer
 
-    def prepare_requests(self, requests: Sequence[PolicyRequest]) -> PreparedQueryMemoryBatch:
+    def prepare_requests(self, requests: Sequence[PolicyInput]) -> PreparedQueryMemoryBatch:
         if not requests:
             raise ValueError("requests must contain at least one policy request")
         benchmark = requests[0].benchmark

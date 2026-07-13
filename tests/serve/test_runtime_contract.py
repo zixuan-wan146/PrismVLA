@@ -5,6 +5,7 @@ import math
 import pytest
 
 from prism.serve.protocol import policy_request_from_mapping
+from prism.schema import PolicyInput
 
 
 def tiny_rgb_image(value: int = 0):
@@ -37,6 +38,7 @@ def valid_request() -> dict:
 def test_policy_request_from_mapping_accepts_canonical_payload():
     request = policy_request_from_mapping(valid_request())
 
+    assert isinstance(request, PolicyInput)
     assert request.benchmark == "libero"
     assert request.prompt == "pick up the object"
     assert tuple(request.images_by_view) == ("agentview_rgb", "eye_in_hand_rgb")

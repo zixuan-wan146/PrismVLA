@@ -309,7 +309,11 @@ X_i = X_i + g_i * CrossAttention_memory_i(X_i, project_memory_i(M))
 
 If the Bridge internal width differs from either conditioning width, each layer uses normalization and learned projections from 1024 and 512 to the configured action width. Projection may reduce channel width but must not pool either token sequence. The Bridge receives 48 current tokens and 24 memory tokens, preserving a `2:1` current-to-history token-count priority.
 
-The precise Bridge internal width, attention-head count, action-latent count, and feed-forward ratio have not yet been accepted. They must remain explicit configuration fields.
+The action stream contains exactly eight learned action-step tokens, one for each
+parallel action in the accepted horizon. The action hidden width,
+attention-head count, and feed-forward ratio have not yet been accepted. They
+must remain explicit architecture configuration fields and must be resolved
+before constructing the policy.
 
 ## 9. Relationship to research references
 
@@ -361,19 +365,50 @@ The Bridge receives the 48 current query states from each layer rather than rece
 
 Direct visual-token conditioning remains a possible ablation, not part of the accepted baseline.
 
-## 11. Training boundaries
+## 11. Direct action and training contract
 
-The following are intentionally not decided by this document:
+The action objective is no longer an open question. The accepted first policy
+uses eight learned action-step queries with learned temporal position
+embeddings and explicit normalized-state conditioning. The 48 Qwen action
+queries remain layer-wise multimodal readers; they are not the eight action-step
+queries and are not assigned to timesteps.
 
-- continuous-action parameterization;
-- action-latent count and representation;
-- flow-matching, denoising, or regression objective;
-- Bridge hidden width, head count, and feed-forward structure;
-- full-backbone tuning, partial tuning, or parameter-efficient tuning;
-- optimizer parameter groups and learning rates;
-- the final policy checkpoint format.
+Every Bridge block performs non-causal action-step self-attention, current-query
+cross-attention, gated history-memory cross-attention, and a feed-forward
+update. Sixteen Bridge blocks consume Q1 through Q16 exactly once. A final
+normalization and linear projection produce:
 
-There will be no legacy stage-1/stage-2 training architecture. A future training design may use optimizer groups or freeze schedules only if they are justified as configuration-driven optimization choices, not as separate model definitions.
+```text
+normalized_actions: [B, 8, 7]
+```
+
+The seven action dimensions are delta position (3), delta rotation (3), and an
+absolute canonical gripper command (1). The first six dimensions use
+training-split q01/q99 normalization with a hard clip to [-1,1]. The gripper is
+stored as 0=close and 1=open, uses identity normalization, and is decoded with
+the strict rule prediction > 0.5 means open; exactly 0.5 means close.
+
+All seven dimensions use one masked L1 objective:
+
+```text
+element_mask = action_valid_mask[:, :, None] & action_dim_mask[:, None, :]
+loss = sum(abs(predicted_actions - target_actions) * element_mask)
+       / sum(element_mask)
+```
+
+The output projection has no tanh or sigmoid. The baseline does not construct a
+flow-matching, diffusion, noisy-action, timestep, velocity-target, BCE, or
+classification path.
+
+The unresolved architecture values are the action hidden width, attention-head
+count, and feed-forward ratio. The unresolved optimization choices are
+backbone tuning scope, optimizer groups, learning rates, and the final
+checkpoint cadence. These values must be explicit configuration, not source
+constants.
+
+There is no legacy stage-1/stage-2 training architecture. Freeze schedules, if
+used, are configuration-driven optimization choices rather than separate model
+definitions.
 
 ## 12. Required implementation tests
 
@@ -396,6 +431,10 @@ The implementation is not complete until remote tests cover all of the following
 15. The runtime predicts and executes eight actions before the next policy request.
 16. MTP, blocks 17 through 24, and vocabulary-logit computation are absent from the VLA forward graph.
 17. LIBERO and CALVIN protocol smoke tests preserve ordered current and history two-camera contracts.
+18. Eight action-step queries remain distinct from the 48 Qwen query readers and produce exactly `[B, 8, 7]`.
+19. Action self-attention, temporal position embeddings, and state conditioning all receive gradients.
+20. Masked L1 counts only valid time/dimension elements and uses the same loss for motion and gripper.
+21. Gripper decoding uses `prediction > 0.5`; no BCE, sigmoid, noisy-action, timestep, flow, or diffusion path is constructed.
 
 All shape, mask, truncation, parameter-count, and benchmark-protocol tests must run in the remote project environment.
 

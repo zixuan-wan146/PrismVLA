@@ -8,18 +8,13 @@ from typing import Any
 
 import numpy as np
 
+from prism.schema import PolicyInput
+
 
 @dataclass(frozen=True)
-class PolicyRequest:
-    benchmark: str
-    prompt: str
-    images_by_view: Mapping[str, np.ndarray]
-    history_images_by_view: Mapping[str, np.ndarray]
-    history_step_ages: np.ndarray
-    history_valid_mask: np.ndarray
-    state: np.ndarray
-    action_dim: int
-    robot_key: str | None = None
+class PolicyRequest(PolicyInput):
+    """Validated wire request compatible with the model-facing PolicyInput."""
+
     return_debug: bool = False
 
 

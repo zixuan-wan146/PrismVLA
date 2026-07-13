@@ -19,6 +19,7 @@ from experiments.calvin.config import (
     configure_calvin_environment,
 )
 from prism.config import as_bool, load_config, parse_profile_env, print_dry_run, run_with_environment
+from prism.data.normalization import decode_gripper_for_environment
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
@@ -27,7 +28,7 @@ from prism.utils.seeding import set_global_seed
 
 
 CALVIN_BENCHMARK = "calvin"
-CALVIN_VIEW_ORDER = ("image", "wrist_image")
+CALVIN_VIEW_ORDER = ("primary", "wrist")
 CALVIN_STATE_DIM = 8
 CALVIN_ACTION_DIM = 7
 
@@ -51,25 +52,22 @@ def to_calvin_action(
     action: Sequence[float],
     *,
     control_dim: int = CALVIN_CONTROL_DIM,
-    gripper_mode: str = "sign",
 ) -> list[float]:
     if len(action) < control_dim:
         raise ValueError(f"Action dimension {len(action)} is smaller than CALVIN control dim {control_dim}")
     calvin_action = [float(value) for value in action[:control_dim]]
-    if gripper_mode == "passthrough":
-        return calvin_action
-    if gripper_mode == "openvla":
-        calvin_action[6] = -1.0 if calvin_action[6] > 0.5 else 1.0
-    elif gripper_mode == "sign":
-        calvin_action[6] = -1.0 if calvin_action[6] < 0.0 else 1.0
-    else:
-        raise ValueError(f"unsupported CALVIN gripper mode: {gripper_mode!r}")
+    calvin_action[6] = float(
+        decode_gripper_for_environment(
+            np.asarray(calvin_action[6], dtype=np.float32),
+            CALVIN_BENCHMARK,
+        )
+    )
     return calvin_action
 
 
 CALVIN_ENV_VIEW_TO_CACHE_VIEW = {
-    "rgb_static": "image",
-    "rgb_gripper": "wrist_image",
+    "rgb_static": "primary",
+    "rgb_gripper": "wrist",
 }
 
 
@@ -84,9 +82,12 @@ def build_calvin_state(obs: Mapping[str, Any]) -> np.ndarray:
     robot_obs = np.asarray(_extract_robot_obs(obs), dtype=np.float32).reshape(-1)
     if robot_obs.size < 8:
         raise ValueError(f"CALVIN robot_obs must contain at least 8 values, got {robot_obs.size}")
-    # Training data uses TCP xyz/rpy, gripper width, and the commanded gripper state.
-    # Raw CALVIN observations place seven arm joints between the final two fields.
-    return np.concatenate((robot_obs[:7], robot_obs[-1:])).astype(np.float32, copy=False)
+    # The canonical training layout is TCP xyz/rpy, an explicit zero pad, and
+    # gripper width. Raw CALVIN robot_obs stores width at index 6, followed by
+    # seven arm joints and a signed gripper command.
+    return np.concatenate((robot_obs[:6], np.zeros((1,), dtype=np.float32), robot_obs[6:7])).astype(
+        np.float32, copy=False
+    )
 
 
 def _extract_rgb(obs: Mapping[str, Any], key: str) -> np.ndarray:
@@ -547,7 +548,7 @@ async def rollout_subtask(
     frames: list[np.ndarray] = []
     decision_steps = 0
     control_steps = 0
-    history_buffer = SparseHistoryBuffer(view_names=("image", "wrist_image"))
+    history_buffer = SparseHistoryBuffer(view_names=CALVIN_VIEW_ORDER)
     while control_steps < config.max_steps_per_subtask:
         decision_steps += 1
         current_images = build_calvin_images_by_view(obs)
@@ -566,7 +567,7 @@ async def rollout_subtask(
             return _rollout_result(False, decision_steps, control_steps, f"action_parse_error: {exc}", video_paths)
 
         for chunk_step, action_values in enumerate(action_chunk, start=1):
-            action = to_calvin_action(action_values, gripper_mode=config.gripper_mode)
+            action = to_calvin_action(action_values)
             try:
                 obs, _reward, _done, current_info = env.step(action)
             except Exception as exc:
@@ -634,8 +635,8 @@ def _prompt_for_subtask(annotations: dict[str, list[str]], subtask: str) -> str:
 
 def _compose_video_frame(obs: dict[str, Any]) -> np.ndarray:
     images = build_calvin_images_by_view(obs)
-    static_img = images["image"]
-    gripper_img = images["wrist_image"]
+    static_img = images["primary"]
+    gripper_img = images["wrist"]
     min_height = min(static_img.shape[0], gripper_img.shape[0])
     if static_img.shape[0] != min_height:
         static_img = static_img[:min_height]

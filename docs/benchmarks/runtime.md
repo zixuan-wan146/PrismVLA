@@ -18,9 +18,9 @@ From the repository root, the expected data-disk layout is:
 ├── libero/
 └── calvin/
 local_data/
-├── checkpoints/action_segment_autoencoder/
-├── datasets/action_segment_autoencoder/
-└── eval/
+├── checkpoints/
+├── eval/
+└── runs/
 ```
 
 The model server runs in the model environment. Benchmark clients run in their own
@@ -49,14 +49,22 @@ budgets are 220, 280, 300, and 520 environment steps for `libero_spatial`,
 `libero_object`, `libero_goal`, and `libero_10`, respectively. Open-loop replanning
 does not reduce these benchmark limits.
 
-CALVIN requires its gripper control to be exactly `-1` or `+1`. The client therefore
-uses `PRISM_CALVIN_GRIPPER_MODE=sign` by default. Set `passthrough` only when a policy
-backend already emits those exact discrete values; `openvla` remains available for
-the legacy 0-to-1 convention.
+The direct policy backend returns eight seven-dimensional actions in parallel. Its
+seventh value is a continuous canonical gripper prediction where `0` means closed
+and `1` means open. Both clients apply the strict predicate `prediction > 0.5`, so a
+prediction equal to 0.5 is closed. LIBERO maps the decoded value with
+`1 - 2 * open` (`+1=close, -1=open`); CALVIN maps it with `2 * open - 1`
+(`-1=close, +1=open`). There is no `PRISM_CALVIN_GRIPPER_MODE` switch and no action
+autoencoder in the accepted inference path.
 
-The server accepts a model-agnostic `PolicyBackend`. The old checkpoint-specific
-policy launcher has been removed; the redesigned model will provide its own
-backend and launch entry point without changing benchmark clients.
+The server accepts the model-agnostic `PolicyBackend` protocol and includes a
+checkpoint-aware direct implementation, `CheckpointPolicyBackend`. It verifies the
+checkpoint manifest plus architecture, DataSpec, statistics, dataset, robot, and
+request contracts; normalizes raw canonical state with checkpoint-embedded
+statistics; calls the already-loaded `PrismPolicy`; and denormalizes the direct
+`[1, 8, 7]` result. Loading model/Accelerate weights remains the launcher's
+responsibility: the backend requires an already loaded policy and does not claim to
+load weights itself.
 
 Run a benchmark client from the repository root. Each script uses its benchmark's
 `configs/eval.yaml` profile by default:

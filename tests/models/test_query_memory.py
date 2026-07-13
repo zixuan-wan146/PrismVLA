@@ -3,11 +3,26 @@ from __future__ import annotations
 import pytest
 import torch
 
-from prism.models.config import HistoryQFormerConfig, load_architecture_config
+from prism.models.config import (
+    DirectActionHeadConfig,
+    HistoryQFormerConfig,
+    PrismArchitectureConfig,
+    load_architecture_config,
+)
 from prism.models.history_qformer import HistoryQFormer
 from prism.models.query_features import gather_layerwise_action_queries
 from prism.models.query_memory_bridge import LayerwiseQueryMemoryBridge
 from prism.models.vlm import pack_two_camera_history_features
+
+
+def _resolved_architecture() -> PrismArchitectureConfig:
+    return PrismArchitectureConfig(
+        action_head=DirectActionHeadConfig(
+            action_hidden_size=32,
+            num_attention_heads=4,
+            ffn_ratio=2,
+        )
+    )
 
 
 def test_accepted_architecture_config_loads_from_yaml():
@@ -19,6 +34,17 @@ def test_accepted_architecture_config_loads_from_yaml():
     assert config.history.num_heads == 4
     assert config.history.num_memory_tokens == 24
     assert config.temporal.history_step_ages == (6, 3)
+    assert config.action_head.objective == "direct_masked_l1"
+    assert config.action_head.action_dim == 7
+    assert config.action_head.gripper_index == 6
+    assert config.action_head.gripper_threshold == pytest.approx(0.5)
+
+
+def test_unaccepted_action_policy_dimensions_are_explicitly_unresolved():
+    config = load_architecture_config("configs/model/qwen35_query_memory.yaml")
+
+    with pytest.raises(ValueError, match="not yet accepted"):
+        config.validate_for_policy()
 
 
 def test_gather_layerwise_queries_excludes_h0_and_preserves_all_16_levels():
@@ -120,14 +146,8 @@ def test_two_camera_history_feature_packing_preserves_time_and_view_order():
 
 
 def test_layerwise_bridge_uses_all_levels_and_memory_gate_starts_at_point_one():
-    bridge = LayerwiseQueryMemoryBridge(
-        num_layers=16,
-        action_dim=64,
-        current_dim=1024,
-        memory_dim=512,
-        num_heads=4,
-    )
-    action_states = torch.randn(2, 8, 64)
+    bridge = LayerwiseQueryMemoryBridge(_resolved_architecture())
+    action_states = torch.randn(2, 8, 32)
     current = tuple(torch.randn(2, 48, 1024) for _ in range(16))
     current_mask = torch.ones(2, 48, dtype=torch.bool)
     memory = torch.randn(2, 24, 512)
@@ -141,19 +161,13 @@ def test_layerwise_bridge_uses_all_levels_and_memory_gate_starts_at_point_one():
 
 
 def test_layerwise_bridge_rejects_a_sample_without_current_queries():
-    bridge = LayerwiseQueryMemoryBridge(
-        num_layers=1,
-        action_dim=64,
-        current_dim=1024,
-        memory_dim=512,
-        num_heads=4,
-    )
+    bridge = LayerwiseQueryMemoryBridge(_resolved_architecture())
     current_mask = torch.tensor([[True] * 48, [False] * 48])
 
     with pytest.raises(ValueError, match="at least one valid current-query token"):
         bridge(
-            torch.randn(2, 8, 64),
-            (torch.randn(2, 48, 1024),),
+            torch.randn(2, 8, 32),
+            tuple(torch.randn(2, 48, 1024) for _ in range(16)),
             current_mask,
             torch.randn(2, 24, 512),
             torch.zeros(2, 24, dtype=torch.bool),
@@ -161,13 +175,7 @@ def test_layerwise_bridge_rejects_a_sample_without_current_queries():
 
 
 def test_layerwise_bridge_consumes_each_aligned_current_level_once():
-    bridge = LayerwiseQueryMemoryBridge(
-        num_layers=3,
-        action_dim=64,
-        current_dim=1024,
-        memory_dim=512,
-        num_heads=4,
-    )
+    bridge = LayerwiseQueryMemoryBridge(_resolved_architecture())
     observed_levels = []
     handles = []
     for block in bridge.blocks:
@@ -176,8 +184,8 @@ def test_layerwise_bridge_consumes_each_aligned_current_level_once():
         )
     try:
         bridge(
-            torch.randn(1, 8, 64),
-            tuple(torch.full((1, 48, 1024), float(level)) for level in (1, 2, 3)),
+            torch.randn(1, 8, 32),
+            tuple(torch.full((1, 48, 1024), float(level)) for level in range(1, 17)),
             torch.ones(1, 48, dtype=torch.bool),
             torch.zeros(1, 24, 512),
             torch.zeros(1, 24, dtype=torch.bool),
@@ -186,24 +194,19 @@ def test_layerwise_bridge_consumes_each_aligned_current_level_once():
         for handle in handles:
             handle.remove()
 
-    assert observed_levels == [1.0, 2.0, 3.0]
+    assert observed_levels == [float(level) for level in range(1, 17)]
 
 
 def test_bridge_casts_bfloat16_conditioning_and_preserves_memory_gradients():
-    bridge = LayerwiseQueryMemoryBridge(
-        num_layers=1,
-        action_dim=64,
-        current_dim=32,
-        memory_dim=16,
-        num_heads=4,
-    )
-    action_states = torch.randn(1, 2, 64, dtype=torch.bfloat16, requires_grad=True)
-    current = torch.randn(1, 3, 32, dtype=torch.bfloat16, requires_grad=True)
-    memory = torch.randn(1, 2, 16, dtype=torch.bfloat16, requires_grad=True)
+    bridge = LayerwiseQueryMemoryBridge(_resolved_architecture())
+    block = bridge.blocks[0]
+    action_states = torch.randn(1, 2, 32, dtype=torch.bfloat16, requires_grad=True)
+    current = torch.randn(1, 3, 1024, dtype=torch.bfloat16, requires_grad=True)
+    memory = torch.randn(1, 2, 512, dtype=torch.bfloat16, requires_grad=True)
 
-    output = bridge(
+    output = block(
         action_states,
-        (current,),
+        current,
         torch.ones(1, 3, dtype=torch.bool),
         memory,
         torch.ones(1, 2, dtype=torch.bool),
@@ -214,4 +217,9 @@ def test_bridge_casts_bfloat16_conditioning_and_preserves_memory_gradients():
     assert action_states.grad is not None
     assert current.grad is not None
     assert memory.grad is not None
-    assert bridge.blocks[0].memory_gate.grad is not None
+    assert block.memory_gate.grad is not None
+
+
+def test_layerwise_bridge_requires_resolved_action_dimensions():
+    with pytest.raises(ValueError, match="not yet accepted"):
+        LayerwiseQueryMemoryBridge(PrismArchitectureConfig())

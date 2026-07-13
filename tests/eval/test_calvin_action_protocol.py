@@ -20,23 +20,11 @@ def test_parse_action_response_rejects_server_error():
         parse_action_response(json.dumps({"error": "bad checkpoint"}), horizon=1)
 
 
-def test_to_calvin_action_openvla_gripper_maps_model_binary_to_env_sign():
-    open_action = to_calvin_action([0, 0, 0, 0, 0, 0, 0.2], gripper_mode="openvla")
-    close_action = to_calvin_action([0, 0, 0, 0, 0, 0, 0.8], gripper_mode="openvla")
+def test_to_calvin_action_maps_canonical_open_01_to_environment_sign():
+    close_below = to_calvin_action([0, 0, 0, 0, 0, 0, 0.49])
+    close_at_threshold = to_calvin_action([0, 0, 0, 0, 0, 0, 0.5])
+    open_above = to_calvin_action([0, 0, 0, 0, 0, 0, 0.50001])
 
-    assert open_action[6] == 1.0
-    assert close_action[6] == -1.0
-
-
-def test_to_calvin_action_passthrough_preserves_gripper():
-    action = to_calvin_action([1, 2, 3, 4, 5, 6, -0.7], gripper_mode="passthrough")
-
-    assert action == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -0.7]
-
-
-def test_to_calvin_action_defaults_to_valid_binary_gripper_sign():
-    open_action = to_calvin_action([0, 0, 0, 0, 0, 0, 0.0])
-    close_action = to_calvin_action([0, 0, 0, 0, 0, 0, -0.1])
-
-    assert open_action[6] == 1.0
-    assert close_action[6] == -1.0
+    assert close_below[6] == -1.0
+    assert close_at_threshold[6] == -1.0
+    assert open_above[6] == 1.0

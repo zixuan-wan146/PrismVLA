@@ -69,5 +69,5 @@ def test_real_calvin_rollout_preserves_control_budget_and_sparse_history():
         [True, True],
     ]
     assert all(request.history_step_ages.tolist() == [6, 3] for request in requests)
-    assert tuple(requests[0].images_by_view) == ("image", "wrist_image")
+    assert tuple(requests[0].images_by_view) == ("primary", "wrist")
     assert requests[0].state.shape == (8,)

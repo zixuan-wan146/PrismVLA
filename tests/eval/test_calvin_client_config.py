@@ -16,7 +16,6 @@ def test_default_calvin_config_matches_abc_d_eval_defaults():
     assert config.num_sequences == 1000
     assert config.horizon == 8
     assert config.max_steps_per_subtask == 360
-    assert config.gripper_mode == "sign"
     assert config.save_video is False
 
 
@@ -39,7 +38,6 @@ def test_calvin_config_can_override_paths_and_counts():
             "PRISM_CALVIN_NUM_SEQUENCES": "3",
             "PRISM_CALVIN_SEQUENCE_OFFSET": "7",
             "PRISM_CALVIN_SAVE_VIDEO": "true",
-            "PRISM_CALVIN_GRIPPER_MODE": "openvla",
         }
     )
 
@@ -47,7 +45,6 @@ def test_calvin_config_can_override_paths_and_counts():
     assert config.num_sequences == 3
     assert config.sequence_offset == 7
     assert config.save_video is True
-    assert config.gripper_mode == "openvla"
 
 
 def test_configure_calvin_environment_sets_calvin_root_and_egl_platform():

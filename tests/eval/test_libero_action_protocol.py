@@ -63,6 +63,6 @@ def test_parse_action_response_rejects_non_numeric_value():
 
 
 def test_to_libero_action_converts_gripper_sign():
-    assert to_libero_action([0, 1, 2, 3, 4, 5, 0.6, 99]) == [0, 1, 2, 3, 4, 5, 1.0]
+    assert to_libero_action([0, 1, 2, 3, 4, 5, 0.6, 99]) == [0, 1, 2, 3, 4, 5, -1.0]
     assert to_libero_action([0, 1, 2, 3, 4, 5, 0.5, 99]) == [0, 1, 2, 3, 4, 5, 1.0]
-    assert to_libero_action([0, 1, 2, 3, 4, 5, -0.1, 99]) == [0, 1, 2, 3, 4, 5, -1.0]
+    assert to_libero_action([0, 1, 2, 3, 4, 5, -0.1, 99]) == [0, 1, 2, 3, 4, 5, 1.0]

@@ -15,7 +15,9 @@ from typing import Any
 import numpy as np
 
 from experiments.libero.config import LiberoClientConfig, configure_mujoco_environment
+from experiments.libero.data import LIBERO_IMAGE_TRANSFORM
 from prism.config import as_bool, load_config, parse_profile_env, print_dry_run, run_with_environment
+from prism.data.normalization import decode_gripper_for_environment
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
@@ -24,7 +26,7 @@ from prism.utils.seeding import set_global_seed
 
 
 LIBERO_BENCHMARK = "libero"
-LIBERO_VIEW_ORDER = ("agentview_rgb", "eye_in_hand_rgb")
+LIBERO_VIEW_ORDER = ("primary", "wrist")
 LIBERO_STATE_DIM = 8
 LIBERO_ACTION_DIM = 7
 LIBERO_CONTROL_DIM = 7
@@ -46,20 +48,35 @@ def to_libero_action(action: Sequence[float], control_dim: int = LIBERO_CONTROL_
     if len(action) < control_dim:
         raise ValueError(f"Action dimension {len(action)} is smaller than LIBERO control dim {control_dim}")
     libero_action = [float(value) for value in action[:control_dim]]
-    libero_action[6] = 1.0 if libero_action[6] >= 0.0 else -1.0
+    libero_action[6] = float(
+        decode_gripper_for_environment(
+            np.asarray(libero_action[6], dtype=np.float32),
+            LIBERO_BENCHMARK,
+        )
+    )
     return libero_action
 
 
 LIBERO_ENV_VIEW_TO_CACHE_VIEW = {
-    "agentview_image": "agentview_rgb",
-    "robot0_eye_in_hand_image": "eye_in_hand_rgb",
+    "agentview_image": "primary",
+    "robot0_eye_in_hand_image": "wrist",
 }
 
 
 def build_libero_images_by_view(obs: Mapping[str, Any]) -> dict[str, np.ndarray]:
     return {
-        cache_view: np.ascontiguousarray(obs[env_key]) for env_key, cache_view in LIBERO_ENV_VIEW_TO_CACHE_VIEW.items()
+        cache_view: _canonicalize_libero_image(obs[env_key])
+        for env_key, cache_view in LIBERO_ENV_VIEW_TO_CACHE_VIEW.items()
     }
+
+
+def _canonicalize_libero_image(image: Any) -> np.ndarray:
+    if LIBERO_IMAGE_TRANSFORM != "rotate_180":
+        raise ValueError(f"unsupported LIBERO image transform {LIBERO_IMAGE_TRANSFORM!r}")
+    return np.ascontiguousarray(
+        np.rot90(np.asarray(image, dtype=np.uint8), 2),
+        dtype=np.uint8,
+    )
 
 
 def build_libero_state(obs: Mapping[str, Any]) -> np.ndarray:
@@ -431,14 +448,8 @@ async def _rollout_episode(
                 episode_failed = True
                 break
 
-            frames.append(
-                np.hstack(
-                    [
-                        np.rot90(obs["agentview_image"], 2),
-                        np.rot90(obs["robot0_eye_in_hand_image"], 2),
-                    ]
-                )
-            )
+            video_images = build_libero_images_by_view(obs)
+            frames.append(np.hstack([video_images["primary"], video_images["wrist"]]))
             LOG.debug("[Step %s] reward=%.2f, done=%s, info=%s", step, reward, done, info)
             if done:
                 LOG.info("Task completed")

@@ -57,5 +57,5 @@ def test_real_libero_rollout_preserves_control_budget_and_sparse_history(monkeyp
         [True, True],
     ]
     assert all(request.history_step_ages.tolist() == [6, 3] for request in requests)
-    assert tuple(requests[0].images_by_view) == ("agentview_rgb", "eye_in_hand_rgb")
+    assert tuple(requests[0].images_by_view) == ("primary", "wrist")
     assert requests[0].state.shape == (8,)
