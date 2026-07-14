@@ -123,7 +123,7 @@ def test_websocket_client_routes_out_of_order_history_responses_before_infer():
                 )
             )
 
-        async with websockets.serve(handler, "127.0.0.1", 0, compression=None, max_size=None) as server:
+        async with websockets.serve(handler, "127.0.0.1", 0, compression=None) as server:
             port = server.sockets[0].getsockname()[1]
             async with WebSocketPolicyClient(f"ws://127.0.0.1:{port}") as client:
                 await client.reset_history("episode:1")
@@ -231,3 +231,6 @@ def test_websocket_policy_client_rejects_missing_history_slot_before_next_infere
 def test_websocket_policy_client_rejects_nonpositive_timeouts():
     with pytest.raises(ValueError, match="finite and positive"):
         WebSocketPolicyClient("ws://127.0.0.1:9000", inference_timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        WebSocketPolicyClient("ws://127.0.0.1:9000", max_message_size_bytes=0)

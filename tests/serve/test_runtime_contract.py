@@ -19,11 +19,8 @@ from prism.serve.protocol import (
 )
 
 
-def tiny_rgb_image(value: int = 0):
-    return [
-        [[value, value, value], [value, value, value]],
-        [[value, value, value], [value, value, value]],
-    ]
+def tiny_rgb_image(value: int = 0) -> np.ndarray:
+    return np.full((2, 2, 3), value, dtype=np.uint8)
 
 
 def valid_request() -> dict:
@@ -155,11 +152,6 @@ def test_policy_request_rejects_invalid_images_or_state():
     with pytest.raises(ValueError, match="3 channels"):
         policy_request_from_mapping(non_rgb)
 
-    bad_pixels = valid_request()
-    bad_pixels["images_by_view"]["agentview_rgb"] = [[[256, 0, 0]]]
-    with pytest.raises(ValueError, match="0..255"):
-        policy_request_from_mapping(bad_pixels)
-
     bad_state = valid_request()
     bad_state["state"] = [0.0, math.inf]
     with pytest.raises(ValueError, match="finite"):
@@ -169,6 +161,21 @@ def test_policy_request_rejects_invalid_images_or_state():
     non_string_view["images_by_view"] = {1: tiny_rgb_image()}
     with pytest.raises(ValueError, match="view names must be strings"):
         policy_request_from_mapping(non_string_view)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.bool_, np.int64])
+def test_policy_and_history_requests_reject_non_uint8_images(dtype):
+    image = np.ones((2, 2, 3), dtype=dtype)
+
+    policy_payload = valid_request()
+    policy_payload["images_by_view"]["agentview_rgb"] = image
+    with pytest.raises(ValueError, match="must have dtype uint8"):
+        policy_request_from_mapping(policy_payload)
+
+    history_payload = valid_history_observation()
+    history_payload["images_by_view"]["agentview_rgb"] = image
+    with pytest.raises(ValueError, match="must have dtype uint8"):
+        history_observation_from_mapping(history_payload)
 
 
 def test_request_serializers_do_not_coerce_invalid_generation_or_slot():

@@ -18,10 +18,12 @@ from prism.serve.protocol import (
     policy_request_to_mapping,
 )
 from prism.serve.wire import (
+    DEFAULT_MAX_MESSAGE_SIZE_BYTES,
     WireProtocolError,
     pack_message,
     request_envelope,
     unpack_message,
+    positive_message_size_bytes,
     validate_envelope,
 )
 from prism.utils.evaluation import (
@@ -65,6 +67,7 @@ class WebSocketPolicyClient:
         *,
         connect_timeout_seconds: float = DEFAULT_POLICY_CONNECT_TIMEOUT_SECONDS,
         inference_timeout_seconds: float = DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
+        max_message_size_bytes: int = DEFAULT_MAX_MESSAGE_SIZE_BYTES,
     ) -> None:
         self.server_url = str(server_url)
         self.connect_timeout_seconds = finite_positive_seconds(
@@ -74,6 +77,10 @@ class WebSocketPolicyClient:
         self.inference_timeout_seconds = finite_positive_seconds(
             inference_timeout_seconds,
             "inference_timeout_seconds",
+        )
+        self.max_message_size_bytes = positive_message_size_bytes(
+            max_message_size_bytes,
+            "max_message_size_bytes",
         )
         self._connection = None
         self._websocket = None
@@ -99,7 +106,7 @@ class WebSocketPolicyClient:
         self._connection = websockets.connect(
             self.server_url,
             compression=None,
-            max_size=None,
+            max_size=self.max_message_size_bytes,
             ping_interval=None,
             ping_timeout=None,
             open_timeout=self.connect_timeout_seconds,

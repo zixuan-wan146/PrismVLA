@@ -45,7 +45,7 @@ def load_config(path: str | Path, overrides: Sequence[str] | None = None) -> Pri
         if "=" not in item:
             raise ValueError(f"override must be KEY=VALUE, got {item!r}")
         key, value = item.split("=", 1)
-        raw[key] = _parse_override_value(value)
+        _set_nested_override(raw, key.strip(), _parse_override_value(value))
 
     benchmark = str(raw.get("benchmark", "")).lower()
     if benchmark not in {"libero", "calvin"}:
@@ -73,6 +73,27 @@ def _parse_override_value(value: str) -> Any:
         return value
 
 
+def _set_nested_override(target: dict[str, Any], dotted_key: str, value: Any) -> None:
+    parts = dotted_key.split(".")
+    if not dotted_key or any(not part for part in parts):
+        raise ValueError(f"override key must be non-empty dotted text, got {dotted_key!r}")
+    current = target
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if existing is None:
+            child: dict[str, Any] = {}
+            current[part] = child
+        elif isinstance(existing, Mapping):
+            child = dict(existing)
+            current[part] = child
+        else:
+            raise ValueError(
+                f"override {dotted_key!r} cannot descend through non-mapping key {part!r}"
+            )
+        current = child
+    current[parts[-1]] = value
+
+
 def parse_profile_env(profile_env: Any) -> dict[str, str]:
     if profile_env in (None, ""):
         return {}
@@ -93,6 +114,18 @@ def parse_profile_env(profile_env: Any) -> dict[str, str]:
             raise ValueError(f"profile_env line has an empty key: {raw_line!r}")
         parsed[key] = value.strip()
     return parsed
+
+
+def merge_profile_environment(
+    profile_env: Any,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Apply profile values as defaults while preserving the ambient environment."""
+
+    merged = parse_profile_env(profile_env)
+    ambient = os.environ if environ is None else environ
+    merged.update({str(key): str(value) for key, value in ambient.items()})
+    return merged
 
 
 def as_bool(value: Any) -> bool:

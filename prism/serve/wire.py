@@ -9,10 +9,19 @@ import numpy as np
 PROTOCOL_VERSION = 2
 WIRE_FORMAT = "msgpack-numpy"
 REQUEST_TYPES = frozenset({"infer", "push_history_observation", "reset_history"})
+# Two uncompressed 448x448 RGB views occupy about 1.2 MiB. This limit keeps
+# accepted benchmark requests comfortably below an accidental memory-DoS size.
+DEFAULT_MAX_MESSAGE_SIZE_BYTES = 16 * 1024 * 1024
 
 
 class WireProtocolError(RuntimeError):
     pass
+
+
+def positive_message_size_bytes(value: Any, field_name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer, got {value!r}")
+    return value
 
 
 def pack_message(value: Any) -> bytes:

@@ -17,6 +17,15 @@ class HistoryCaptureTarget:
     slot: int
 
 
+@dataclass(frozen=True, eq=False)
+class _HistoryObservationReservation:
+    """Identity-checked claim for one history slot awaiting visual encoding."""
+
+    stream_id: str
+    target_generation: int
+    slot: int
+
+
 class HistoryPrecomputeSchedule:
     """Track generations and the fixed O2/O5 capture schedule without storing images."""
 
@@ -83,6 +92,7 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
         self._stream_id: str | None = None
         self._last_inferred_generation = -1
         self._building_generation: int | None = None
+        self._reserved_slots: dict[int, _HistoryObservationReservation] = {}
         self._visual_slots: dict[int, VisualObservationT] = {}
         self._ready_generation: int | None = None
         self._ready_memory: MemoryT | None = None
@@ -100,6 +110,10 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
         return tuple(sorted(self._visual_slots))
 
     @property
+    def reserved_slots(self) -> tuple[int, ...]:
+        return tuple(sorted(self._reserved_slots))
+
+    @property
     def ready_generation(self) -> int | None:
         return self._ready_generation
 
@@ -113,19 +127,20 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
         self._stream_id = None
         self._last_inferred_generation = -1
         self._building_generation = None
+        self._reserved_slots.clear()
         self._visual_slots.clear()
         self._ready_generation = None
         self._ready_memory = None
 
-    def add_observation(
+    def reserve_observation(
         self,
         *,
         stream_id: str,
         target_generation: int,
         slot: int,
-        observation: VisualObservationT,
-        build_memory: Callable[[tuple[VisualObservationT, VisualObservationT]], MemoryT],
-    ) -> bool:
+    ) -> _HistoryObservationReservation:
+        """Validate and reserve a destination before any expensive visual work."""
+
         self._require_stream(stream_id)
         self._require_exact_int(target_generation, "target_generation")
         self._require_exact_int(slot, "slot")
@@ -144,9 +159,28 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
             raise ValueError(
                 f"Already building generation {self._building_generation}, got {target_generation}"
             )
-        if slot in self._visual_slots:
+        if slot in self._visual_slots or slot in self._reserved_slots:
             raise ValueError(f"History slot {slot} for generation {target_generation} was pushed more than once")
-        self._visual_slots[slot] = observation
+        reservation = _HistoryObservationReservation(
+            stream_id=stream_id,
+            target_generation=target_generation,
+            slot=slot,
+        )
+        self._reserved_slots[slot] = reservation
+        return reservation
+
+    def commit_observation(
+        self,
+        reservation: _HistoryObservationReservation,
+        *,
+        observation: VisualObservationT,
+        build_memory: Callable[[tuple[VisualObservationT, VisualObservationT]], MemoryT],
+    ) -> bool:
+        """Commit encoded tokens to an active reservation and build memory when full."""
+
+        self._require_active_reservation(reservation)
+        del self._reserved_slots[reservation.slot]
+        self._visual_slots[reservation.slot] = observation
         if len(self._visual_slots) < 2:
             return False
 
@@ -159,8 +193,24 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
             self._ready_generation = None
             self._ready_memory = None
             raise
-        self._ready_generation = target_generation
+        self._ready_generation = reservation.target_generation
         self._ready_memory = memory
+        return True
+
+    def rollback_observation(self, reservation: _HistoryObservationReservation) -> bool:
+        """Release an uncommitted claim after encoding cancellation or failure."""
+
+        if not isinstance(reservation, _HistoryObservationReservation):
+            raise TypeError(
+                "reservation must be the value returned by reserve_observation(), "
+                f"got {type(reservation).__name__}"
+            )
+        active = self._reserved_slots.get(reservation.slot)
+        if active is not reservation:
+            return False
+        del self._reserved_slots[reservation.slot]
+        if not self._reserved_slots and not self._visual_slots:
+            self._building_generation = None
         return True
 
     def memory_for_inference(
@@ -203,6 +253,19 @@ class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
             raise RuntimeError("History stream is not initialized; send reset_history first")
         if stream_id != self._stream_id:
             raise ValueError(f"Active stream is {self._stream_id!r}, got {stream_id!r}")
+
+    def _require_active_reservation(
+        self,
+        reservation: _HistoryObservationReservation,
+    ) -> None:
+        if not isinstance(reservation, _HistoryObservationReservation):
+            raise TypeError(
+                "reservation must be the value returned by reserve_observation(), "
+                f"got {type(reservation).__name__}"
+            )
+        active = self._reserved_slots.get(reservation.slot)
+        if active is not reservation:
+            raise RuntimeError("History observation reservation is no longer active")
 
     @staticmethod
     def _require_exact_int(value: int, field_name: str) -> None:

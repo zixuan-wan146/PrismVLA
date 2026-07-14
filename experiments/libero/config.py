@@ -10,6 +10,7 @@ from prism.utils.evaluation import (
     env_float,
     finite_positive_seconds,
 )
+from prism.serve.wire import DEFAULT_MAX_MESSAGE_SIZE_BYTES, positive_message_size_bytes
 
 
 DEFAULT_TASK_SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
@@ -97,6 +98,7 @@ class LiberoClientConfig:
     video_fps: int
     connect_timeout_seconds: float
     inference_timeout_seconds: float
+    max_message_size_bytes: int
     num_episodes: int
     task_limit: int
     task_offset: int
@@ -143,6 +145,11 @@ class LiberoClientConfig:
                 "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS",
                 DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
             ),
+            max_message_size_bytes=env_int(
+                environ,
+                "PRISM_POLICY_MAX_MESSAGE_SIZE_BYTES",
+                DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+            ),
             num_episodes=env_int(environ, "PRISM_LIBERO_EPISODES", 10),
             task_limit=env_int(environ, "PRISM_LIBERO_TASK_LIMIT", 0),
             task_offset=env_int(environ, "PRISM_LIBERO_TASK_OFFSET", 0),
@@ -167,6 +174,10 @@ class LiberoClientConfig:
         finite_positive_seconds(
             self.connect_timeout_seconds,
             "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS",
+        )
+        positive_message_size_bytes(
+            self.max_message_size_bytes,
+            "PRISM_POLICY_MAX_MESSAGE_SIZE_BYTES",
         )
         finite_positive_seconds(
             self.inference_timeout_seconds,

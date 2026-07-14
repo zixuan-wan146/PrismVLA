@@ -18,7 +18,7 @@ from experiments.calvin.config import (
     CalvinClientConfig,
     configure_calvin_environment,
 )
-from prism.config import as_bool, load_config, parse_profile_env, print_dry_run, run_with_environment
+from prism.config import as_bool, load_config, merge_profile_environment, print_dry_run, run_with_environment
 from prism.data.normalization import decode_gripper_for_environment, decode_gripper_open
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
 from prism.serve.history import HistoryPrecomputeSchedule
@@ -463,6 +463,7 @@ async def run_calvin_eval(
         config.server_url,
         connect_timeout_seconds=config.connect_timeout_seconds,
         inference_timeout_seconds=config.inference_timeout_seconds,
+        max_message_size_bytes=config.max_message_size_bytes,
     )
     try:
         async with client:
@@ -761,8 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(f"Expected a CALVIN profile, got {profile.data.benchmark!r}")
 
     set_global_seed(profile.runtime.seed)
-    environ = dict(os.environ)
-    environ.update(parse_profile_env(profile.raw.get("profile_env", "")))
+    environ = merge_profile_environment(profile.raw.get("profile_env", ""))
     config = CalvinClientConfig.from_env(environ)
     if as_bool(profile.raw.get("dry_run", False)):
         configure_calvin_environment(config, environ)

@@ -4,6 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -13,6 +14,8 @@ from experiments.calvin.data import CALVIN_DATA_SPEC
 from prism.data.normalization import canonical_sha256
 from prism.models.config import DirectActionHeadConfig, PrismArchitectureConfig
 from prism.serve.loading import load_accelerate_model_weights, load_policy_checkpoint
+from prism.serve.server import _validate_server_options
+from prism.serve.wire import DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def _architecture() -> PrismArchitectureConfig:
@@ -100,3 +103,28 @@ def test_policy_loader_reconstructs_embedded_contract_and_loads_same_directory(
     }
     assert not policy.training
     assert all(not parameter.requires_grad for parameter in policy.parameters())
+
+
+def test_server_rejects_unsafe_bind_and_invalid_message_limit():
+    with pytest.raises(ValueError, match="Refusing unauthenticated non-loopback"):
+        _validate_server_options(
+            host="0.0.0.0",
+            port=9000,
+            max_message_size_bytes=DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+            allow_non_loopback=False,
+        )
+
+    assert _validate_server_options(
+        host="::1",
+        port=9000,
+        max_message_size_bytes=DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+        allow_non_loopback=False,
+    ) == DEFAULT_MAX_MESSAGE_SIZE_BYTES
+
+    with pytest.raises(ValueError, match="positive integer"):
+        _validate_server_options(
+            host="127.0.0.1",
+            port=9000,
+            max_message_size_bytes=0,
+            allow_non_loopback=False,
+        )

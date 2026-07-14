@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from prism.serve.server import run_checkpoint_server
+from prism.serve.wire import DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -21,6 +22,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True, help="completed training checkpoint directory")
     parser.add_argument("--host", default="127.0.0.1", help="WebSocket bind host")
     parser.add_argument("--port", type=int, default=9000, help="WebSocket bind port")
+    parser.add_argument(
+        "--max-message-size-bytes",
+        type=int,
+        default=DEFAULT_MAX_MESSAGE_SIZE_BYTES,
+        help="maximum accepted WebSocket message size",
+    )
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="acknowledge the risk of binding this unauthenticated server beyond localhost",
+    )
     parser.add_argument(
         "--device",
         default="auto",
@@ -43,6 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         port=args.port,
         device=args.device,
         local_files_only=args.local_files_only,
+        max_message_size_bytes=args.max_message_size_bytes,
+        allow_non_loopback=args.allow_non_loopback,
     )
     return 0
 

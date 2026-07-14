@@ -37,10 +37,14 @@ structured request IDs and errors. Protocol v2 has three request types:
 `reset_history`, `push_history_observation`, and `infer`. A background response
 router matches generic result envelopes by request ID and request type, so history
 work can be outstanding while the simulator executes later actions. Images must
-remain contiguous `uint8` arrays;
-do not convert them to JSON lists. WebSocket compression and message-size limits
-are disabled because image bytes are already compact and request validation occurs
-after MessagePack decoding.
+use the `uint8` dtype; non-contiguous views are materialized contiguously, while
+float, bool, integer arrays with another dtype, and JSON lists are rejected
+instead of being silently quantized.
+WebSocket compression is disabled because image bytes are already compact.
+Both ends enforce a 16 MiB message limit by default, before MessagePack request
+validation. Set the client value with
+`PRISM_POLICY_MAX_MESSAGE_SIZE_BYTES` and the server value with
+`--max-message-size-bytes`.
 
 An `infer` request carries the two ordered current views, prompt, state,
 `stream_id`, `memory_generation`, and the previous cycle's eight canonical executed
@@ -122,6 +126,17 @@ python scripts/serve_policy.py \
   --local-files-only
 ```
 
+The server has no authentication and refuses non-loopback bind addresses by
+default. Keep it on `127.0.0.1` and use SSH port forwarding when the client is
+on another host:
+
+~~~bash
+ssh -L 9000:127.0.0.1:9000 user@model-server
+~~~
+
+`--allow-non-loopback` is an explicit acknowledgement for a trusted private
+network; it does not add authentication or encryption.
+
 Run a benchmark client from the repository root. Each script uses its benchmark's
 `configs/eval.yaml` profile by default:
 
@@ -140,6 +155,12 @@ experiments/calvin/run_eval.sh experiments/calvin/configs/eval.yaml
 Use `PRISM_LIBERO_PYTHON` or `PRISM_CALVIN_PYTHON` to override the default
 sibling environment. Use `PRISM_SERVER_URI` to connect to a server other than
 `ws://127.0.0.1:9000`.
+
+Values in `profile_env` are defaults. Existing shell environment variables
+take precedence, so an exported camera resolution or result path is not
+silently replaced by YAML. Dotted CLI overrides such as
+`--overrides profile_env.PRISM_LIBERO_CAMERA_RESOLUTION=320` change an
+individual profile default.
 
 Policy connections and the initial metadata handshake are bounded by
 `PRISM_POLICY_CONNECT_TIMEOUT_SECONDS` (default 30 seconds). Every inference

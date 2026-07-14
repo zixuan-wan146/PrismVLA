@@ -5,6 +5,7 @@ from experiments.calvin.config import (
     CalvinClientConfig,
     configure_calvin_environment,
 )
+from prism.serve.wire import DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def test_default_calvin_config_matches_abc_d_eval_defaults():
@@ -19,6 +20,7 @@ def test_default_calvin_config_matches_abc_d_eval_defaults():
     assert config.save_video is False
     assert config.connect_timeout_seconds == 30.0
     assert config.inference_timeout_seconds == 120.0
+    assert config.max_message_size_bytes == DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def test_calvin_config_prefers_shared_server_uri():
@@ -42,6 +44,7 @@ def test_calvin_config_can_override_paths_and_counts():
             "PRISM_CALVIN_SAVE_VIDEO": "true",
             "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS": "8.5",
             "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS": "45",
+            "PRISM_POLICY_MAX_MESSAGE_SIZE_BYTES": "8388608",
         }
     )
 
@@ -51,6 +54,7 @@ def test_calvin_config_can_override_paths_and_counts():
     assert config.save_video is True
     assert config.connect_timeout_seconds == 8.5
     assert config.inference_timeout_seconds == 45.0
+    assert config.max_message_size_bytes == 8388608
 
 
 def test_calvin_rejects_nonpositive_policy_timeout():

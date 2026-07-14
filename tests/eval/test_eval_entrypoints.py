@@ -24,3 +24,26 @@ def test_libero_eval_smoke_config_dry_run(capsys):
 def test_calvin_eval_smoke_config_dry_run(capsys):
     assert calvin_main(["--config", "experiments/calvin/configs/smoke.yaml"]) == 0
     assert "calvin eval dry-run ok" in capsys.readouterr().out
+
+
+def test_libero_shell_environment_overrides_profile_value(monkeypatch, capsys):
+    monkeypatch.setenv("PRISM_LIBERO_CAMERA_RESOLUTION", "320")
+
+    assert libero_main(
+        [
+            "--config",
+            "experiments/libero/configs/smoke.yaml",
+            "--overrides",
+            "profile_env.PRISM_LIBERO_CAMERA_RESOLUTION=448",
+        ]
+    ) == 0
+
+    assert "camera_resolution: 320" in capsys.readouterr().out
+
+
+def test_calvin_shell_environment_overrides_profile_value(monkeypatch, capsys):
+    monkeypatch.setenv("PRISM_CALVIN_NUM_SEQUENCES", "2")
+
+    assert calvin_main(["--config", "experiments/calvin/configs/smoke.yaml"]) == 0
+
+    assert "num_sequences: 2" in capsys.readouterr().out

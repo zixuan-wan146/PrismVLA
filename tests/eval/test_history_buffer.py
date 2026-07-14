@@ -52,18 +52,26 @@ def test_connection_history_state_builds_memory_and_releases_visual_slots():
         built_from.append(observations)
         return "ready-memory"
 
-    assert not state.add_observation(
+    first = state.reserve_observation(
         stream_id="episode:1",
         target_generation=1,
         slot=0,
+    )
+    assert state.reserved_slots == (0,)
+    assert not state.commit_observation(
+        first,
         observation="visual-o2",
         build_memory=build_memory,
     )
+    assert state.reserved_slots == ()
     assert state.cached_visual_slots == (0,)
-    assert state.add_observation(
+    second = state.reserve_observation(
         stream_id="episode:1",
         target_generation=1,
         slot=1,
+    )
+    assert state.commit_observation(
+        second,
         observation="visual-o5",
         build_memory=build_memory,
     )
@@ -89,10 +97,13 @@ def test_connection_history_state_requires_reset_and_complete_memory():
     state.reset("episode:2")
     state.memory_for_inference(stream_id="episode:2", generation=0, empty_memory=lambda: "empty")
     state.mark_inference_complete(stream_id="episode:2", generation=0)
-    state.add_observation(
+    reservation = state.reserve_observation(
         stream_id="episode:2",
         target_generation=1,
         slot=0,
+    )
+    state.commit_observation(
+        reservation,
         observation="only-slot",
         build_memory=lambda observations: "unused",
     )
@@ -107,10 +118,13 @@ def test_connection_history_reset_drops_partial_and_ready_tokens():
     state.reset("old")
     state.memory_for_inference(stream_id="old", generation=0, empty_memory=object)
     state.mark_inference_complete(stream_id="old", generation=0)
-    state.add_observation(
+    reservation = state.reserve_observation(
         stream_id="old",
         target_generation=1,
         slot=0,
+    )
+    state.commit_observation(
+        reservation,
         observation=object(),
         build_memory=lambda observations: object(),
     )
@@ -129,10 +143,13 @@ def test_connection_history_build_failure_drops_both_visual_slots():
     state.reset("episode:3")
     state.memory_for_inference(stream_id="episode:3", generation=0, empty_memory=lambda: "empty")
     state.mark_inference_complete(stream_id="episode:3", generation=0)
-    state.add_observation(
+    first = state.reserve_observation(
         stream_id="episode:3",
         target_generation=1,
         slot=0,
+    )
+    state.commit_observation(
+        first,
         observation="o2",
         build_memory=lambda observations: "unused",
     )
@@ -140,13 +157,55 @@ def test_connection_history_build_failure_drops_both_visual_slots():
     def fail_build(observations):
         raise RuntimeError(f"failed for {observations}")
 
+    second = state.reserve_observation(
+        stream_id="episode:3",
+        target_generation=1,
+        slot=1,
+    )
     with pytest.raises(RuntimeError, match="failed for"):
-        state.add_observation(
-            stream_id="episode:3",
-            target_generation=1,
-            slot=1,
+        state.commit_observation(
+            second,
             observation="o5",
             build_memory=fail_build,
         )
     assert state.cached_visual_slots == ()
     assert state.ready_generation is None
+
+
+def test_connection_history_reservation_rolls_back_without_losing_committed_slot():
+    state: ConnectionHistoryState[str, str] = ConnectionHistoryState()
+    state.reset("episode:4")
+    state.memory_for_inference(stream_id="episode:4", generation=0, empty_memory=lambda: "empty")
+    state.mark_inference_complete(stream_id="episode:4", generation=0)
+
+    first_attempt = state.reserve_observation(
+        stream_id="episode:4",
+        target_generation=1,
+        slot=0,
+    )
+    assert state.rollback_observation(first_attempt)
+    assert state.reserved_slots == ()
+
+    first = state.reserve_observation(
+        stream_id="episode:4",
+        target_generation=1,
+        slot=0,
+    )
+    state.commit_observation(
+        first,
+        observation="visual-o2",
+        build_memory=lambda observations: "unused",
+    )
+    second_attempt = state.reserve_observation(
+        stream_id="episode:4",
+        target_generation=1,
+        slot=1,
+    )
+    assert state.rollback_observation(second_attempt)
+    assert state.cached_visual_slots == (0,)
+    assert state.reserved_slots == ()
+    assert state.reserve_observation(
+        stream_id="episode:4",
+        target_generation=1,
+        slot=1,
+    ).slot == 1

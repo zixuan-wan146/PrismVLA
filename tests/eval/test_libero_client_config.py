@@ -6,6 +6,7 @@ from experiments.libero.config import (
     align_max_steps,
     configure_mujoco_environment,
 )
+from prism.serve.wire import DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def test_default_config_matches_documented_smoke_server():
@@ -22,6 +23,7 @@ def test_default_config_matches_documented_smoke_server():
     assert config.video_fps == 30
     assert config.connect_timeout_seconds == 30.0
     assert config.inference_timeout_seconds == 120.0
+    assert config.max_message_size_bytes == DEFAULT_MAX_MESSAGE_SIZE_BYTES
 
 
 def test_single_max_steps_value_expands_to_all_task_suites():
@@ -77,6 +79,7 @@ def test_rendering_and_policy_timeouts_can_be_overridden():
             "PRISM_LIBERO_VIDEO_FPS": "24",
             "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS": "4.5",
             "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS": "19",
+            "PRISM_POLICY_MAX_MESSAGE_SIZE_BYTES": "8388608",
         }
     )
 
@@ -84,6 +87,7 @@ def test_rendering_and_policy_timeouts_can_be_overridden():
     assert config.video_fps == 24
     assert config.connect_timeout_seconds == 4.5
     assert config.inference_timeout_seconds == 19.0
+    assert config.max_message_size_bytes == 8388608
 
 
 def test_nonpositive_policy_timeout_is_rejected():

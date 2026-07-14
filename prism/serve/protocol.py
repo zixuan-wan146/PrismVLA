@@ -248,13 +248,9 @@ def _validate_image_array(value: Any, field_name: str) -> np.ndarray:
         raise ValueError(f"{field_name} must have non-empty height and width, got shape={array.shape}")
     if array.shape[2] != 3:
         raise ValueError(f"{field_name} must have 3 channels, got shape={array.shape}")
-    if not np.issubdtype(array.dtype, np.number) and not np.issubdtype(array.dtype, np.bool_):
-        raise ValueError(f"{field_name} must contain numeric pixel values, got dtype={array.dtype}")
-    if not np.isfinite(array).all():
-        raise ValueError(f"{field_name} must contain only finite pixel values")
-    if array.min() < 0 or array.max() > 255:
-        raise ValueError(f"{field_name} pixel values must be in the 0..255 range")
-    return np.asarray(array, dtype=np.uint8)
+    if array.dtype != np.dtype(np.uint8):
+        raise ValueError(f"{field_name} must have dtype uint8, got dtype={array.dtype}")
+    return np.ascontiguousarray(array)
 
 
 def _validate_vector(value: Any, field_name: str) -> np.ndarray:

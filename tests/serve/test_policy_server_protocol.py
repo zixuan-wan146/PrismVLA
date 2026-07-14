@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -10,8 +11,14 @@ import websockets
 from prism.models.task_state_planner import MambaStreamingCache, TaskStatePlannerRuntimeState
 from prism.serve.backend import PolicyBackendInference
 from prism.serve.client import WebSocketPolicyClient
-from prism.serve.protocol import HistoryObservationRequest, PolicyRequest
-from prism.serve.server import handle_request
+from prism.serve.history import ConnectionHistoryState
+from prism.serve.protocol import (
+    HistoryObservationRequest,
+    PolicyRequest,
+    history_observation_to_mapping,
+    policy_request_to_mapping,
+)
+from prism.serve.server import _dispatch_request, handle_request
 
 
 class _Backend:
@@ -22,8 +29,14 @@ class _Backend:
         self.memory_builds = []
         self.inferences = []
         self.fail_generation_one_once = False
+        self.fail_encode_slot_once = None
+        self.encode_attempts = []
 
     def encode_history_observation(self, request):
+        self.encode_attempts.append(request.slot)
+        if request.slot == self.fail_encode_slot_once:
+            self.fail_encode_slot_once = None
+            raise RuntimeError("transient history encoding failure")
         encoded = f"visual-slot-{request.slot}"
         self.encoded_slots.append((request.slot, encoded))
         return encoded
@@ -121,7 +134,6 @@ def test_policy_server_and_client_precompute_session_memory():
             "127.0.0.1",
             0,
             compression=None,
-            max_size=None,
         ) as server:
             port = server.sockets[0].getsockname()[1]
             async with WebSocketPolicyClient(f"ws://127.0.0.1:{port}") as client:
@@ -225,3 +237,152 @@ def test_planning_state_commits_only_after_success_and_reset_clears_it():
 
     backend = asyncio.run(run_test())
     assert backend.previous_planning_values == [None, 1.0, 1.0, None]
+
+
+def test_invalid_history_request_is_rejected_before_waiting_for_gpu_lock():
+    async def run_test():
+        backend = _Backend()
+        history_state = ConnectionHistoryState()
+        planning_states = {}
+        inference_lock = asyncio.Lock()
+        await _dispatch_request(
+            request_type="reset_history",
+            payload={"stream_id": "episode:1"},
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+        await _dispatch_request(
+            request_type="infer",
+            payload=policy_request_to_mapping(_request(0)),
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+        first_payload = history_observation_to_mapping(_history(0))
+        await _dispatch_request(
+            request_type="push_history_observation",
+            payload=first_payload,
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+
+        await inference_lock.acquire()
+        try:
+            with pytest.raises(ValueError, match="pushed more than once"):
+                await asyncio.wait_for(
+                    _dispatch_request(
+                        request_type="push_history_observation",
+                        payload=first_payload,
+                        backend=backend,
+                        history_state=history_state,
+                        planning_states=planning_states,
+                        inference_lock=inference_lock,
+                    ),
+                    timeout=0.1,
+                )
+            future_payload = history_observation_to_mapping(
+                replace(_history(1), target_generation=2)
+            )
+            with pytest.raises(ValueError, match="Expected history for generation 1"):
+                await asyncio.wait_for(
+                    _dispatch_request(
+                        request_type="push_history_observation",
+                        payload=future_payload,
+                        backend=backend,
+                        history_state=history_state,
+                        planning_states=planning_states,
+                        inference_lock=inference_lock,
+                    ),
+                    timeout=0.1,
+                )
+            wrong_stream_payload = history_observation_to_mapping(
+                replace(_history(1), stream_id="episode:2")
+            )
+            with pytest.raises(ValueError, match="Active stream"):
+                await asyncio.wait_for(
+                    _dispatch_request(
+                        request_type="push_history_observation",
+                        payload=wrong_stream_payload,
+                        backend=backend,
+                        history_state=history_state,
+                        planning_states=planning_states,
+                        inference_lock=inference_lock,
+                    ),
+                    timeout=0.1,
+                )
+            invalid_slot_payload = history_observation_to_mapping(_history(1))
+            invalid_slot_payload["slot"] = 2
+            with pytest.raises(ValueError, match="slot must be 0 or 1"):
+                await asyncio.wait_for(
+                    _dispatch_request(
+                        request_type="push_history_observation",
+                        payload=invalid_slot_payload,
+                        backend=backend,
+                        history_state=history_state,
+                        planning_states=planning_states,
+                        inference_lock=inference_lock,
+                    ),
+                    timeout=0.1,
+                )
+        finally:
+            inference_lock.release()
+        return backend
+
+    backend = asyncio.run(run_test())
+    assert backend.encode_attempts == [0]
+    assert backend.encoded_slots == [(0, "visual-slot-0")]
+
+
+def test_history_encoding_failure_rolls_back_reservation_for_retry():
+    async def run_test():
+        backend = _Backend()
+        backend.fail_encode_slot_once = 0
+        history_state = ConnectionHistoryState()
+        planning_states = {}
+        inference_lock = asyncio.Lock()
+        await _dispatch_request(
+            request_type="reset_history",
+            payload={"stream_id": "episode:1"},
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+        await _dispatch_request(
+            request_type="infer",
+            payload=policy_request_to_mapping(_request(0)),
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+        payload = history_observation_to_mapping(_history(0))
+        with pytest.raises(RuntimeError, match="transient history encoding failure"):
+            await _dispatch_request(
+                request_type="push_history_observation",
+                payload=payload,
+                backend=backend,
+                history_state=history_state,
+                planning_states=planning_states,
+                inference_lock=inference_lock,
+            )
+        assert history_state.reserved_slots == ()
+        response = await _dispatch_request(
+            request_type="push_history_observation",
+            payload=payload,
+            backend=backend,
+            history_state=history_state,
+            planning_states=planning_states,
+            inference_lock=inference_lock,
+        )
+        return backend, response
+
+    backend, response = asyncio.run(run_test())
+    assert backend.encode_attempts == [0, 0]
+    assert backend.encoded_slots == [(0, "visual-slot-0")]
+    assert response["memory_ready"] is False
