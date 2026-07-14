@@ -5,6 +5,10 @@ repository on the data disk. Dataset roots, model caches, output directories,
 and temporary files in the checked-in configurations are relative to the
 repository root.
 
+The staged launch gates, throughput pilot, storage estimate, checkpoint
+selection protocol, and conditions for training the currently frozen planner
+are defined in [Training execution plan](training_plan.md).
+
 ## Current runnable baseline
 
 The current implementation uses:
@@ -66,6 +70,12 @@ One-step remote smoke configurations are provided for both benchmarks:
   --config configs/train/libero_smoke.yaml
 ```
 
+On the verified RTX 4090 host, fresh validation smokes on 2026-07-15 completed
+in 60.7 seconds for CALVIN and 51.0 seconds for LIBERO, with about 3.4 GiB peak
+CUDA memory and a 2.5 GiB checkpoint each. These are end-to-end smoke timings,
+not steady-state throughput measurements; run the 100-step pilot gate before
+estimating a long training ETA.
+
 Checkpoints are immutable. A smoke command therefore requires that its
 configured output/checkpoint directory does not already exist. Production
 baselines use:
@@ -124,6 +134,10 @@ gradients, and then exposes the MessagePack/WebSocket protocol:
   --port 9000 \
   --local-files-only
 ```
+
+The server accepts at most 16 MiB per WebSocket message by default and refuses
+non-loopback binds unless --allow-non-loopback is passed explicitly. It has no
+built-in authentication; prefer loopback plus an SSH tunnel.
 
 LIBERO and CALVIN benchmark clients connect with `PRISM_SERVER_URI`. Their
 adapters clip the six de-normalized relative motion dimensions to the verified

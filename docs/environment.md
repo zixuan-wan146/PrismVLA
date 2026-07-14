@@ -93,6 +93,30 @@ PRSIM_PIP_INDEX_URL=https://pypi.org/simple bash scripts/setup_env.sh
 
 The benchmark simulator environments remain separate. `prsim` owns model training, model inference, protocol tests, and the policy server; LIBERO and CALVIN clients run in their benchmark-specific environments through the MessagePack/WebSocket boundary.
 
+Create or converge those benchmark environments from their verified,
+fully-pinned Linux/Python 3.8 lock files:
+
+~~~bash
+bash scripts/setup_libero_eval_env.sh
+bash scripts/setup_calvin_eval_env.sh
+~~~
+
+The scripts place environments at ../envs/libero and ../envs/calvin, pip
+caches at ../pip-cache, and temporary files at ../tmp. Override them with
+PRISM_LIBERO_ENV_PREFIX, PRISM_CALVIN_ENV_PREFIX, PIP_CACHE_DIR, and TMPDIR.
+PRISM_ENABLE_NETWORK_TURBO=1 opts into /etc/network_turbo;
+PRISM_PIP_INDEX_URL selects the pip index. PRISM_CONDA_BIN selects Conda, and
+PRISM_CALVIN_ROOT selects the pinned CALVIN source checkout.
+
+requirements/libero-eval.lock.txt reproduces the verified LIBERO 0.1.1 /
+robosuite 1.4.0 / MuJoCo 3.2.3 environment.
+requirements/calvin-eval.lock.txt is paired with CALVIN commit
+fa03f01f19c65920e18cf37398a9ce859274af76 and its calvin_env submodule
+commit 1431a46bd36bde5903fb6345e68b5ccc30def666. The setup script clones those
+sources on the data disk and refuses mismatched or tracked-dirty checkouts.
+Simulator dependencies intentionally do not appear as project extras because
+their Python/Torch stacks conflict with the Python 3.10 model environment.
+
 Download the accepted backbone into the data-disk cache and run the opt-in real-checkpoint test with:
 
 ```bash
