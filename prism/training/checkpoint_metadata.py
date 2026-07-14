@@ -12,13 +12,16 @@ import base64
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 from importlib import metadata as importlib_metadata
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath
 import platform
 import random
 import re
+import stat
 import subprocess
 from types import MappingProxyType
 from typing import Any
@@ -39,7 +42,8 @@ from prism.training.config import TRAIN_CONFIG_SNAPSHOT_FORMAT
 from prism.training.config import build_checkpoint_snapshot
 
 
-CHECKPOINT_FORMAT = "prism-checkpoint-v1"
+CHECKPOINT_FORMAT = "prism-checkpoint-v2"
+GIT_PROVENANCE_FORMAT = "prism-git-provenance-v1"
 RNG_FORMAT = "prism-rng-v1"
 METADATA_FILENAME = "prism_metadata.json"
 RNG_DIRECTORY = "prism_rng"
@@ -492,11 +496,56 @@ def parse_metadata(payload: Any, *, checkpoint: Path) -> CheckpointMetadata:
     validate_progress(progress, snapshot, world_size=world_size)
 
     git = _strict_mapping(root["git"], "checkpoint git metadata")
-    _expect_keys(git, {"commit", "dirty"}, "checkpoint git metadata")
+    _expect_keys(
+        git,
+        {
+            "format",
+            "commit",
+            "dirty",
+            "tracked_diff",
+            "tracked_diff_sha256",
+            "untracked_files",
+        },
+        "checkpoint git metadata",
+    )
+    if git["format"] != GIT_PROVENANCE_FORMAT:
+        raise ValueError(f"unsupported checkpoint git provenance format {git['format']!r}")
     if not isinstance(git["commit"], str) or _GIT_COMMIT_RE.fullmatch(git["commit"]) is None:
         raise ValueError("checkpoint git commit must be a lowercase Git object id")
     if type(git["dirty"]) is not bool:
         raise TypeError("checkpoint git dirty must be a boolean")
+    tracked_diff = git["tracked_diff"]
+    if not isinstance(tracked_diff, str):
+        raise TypeError("checkpoint tracked Git diff must be text")
+    _stored_sha(git["tracked_diff_sha256"], "checkpoint tracked Git diff SHA256")
+    computed_diff_sha = hashlib.sha256(tracked_diff.encode("utf-8")).hexdigest()
+    if git["tracked_diff_sha256"] != computed_diff_sha:
+        raise ValueError(
+            "checkpoint tracked Git diff hash mismatch: "
+            f"stored {git['tracked_diff_sha256']}, computed {computed_diff_sha}"
+        )
+    untracked_files = git["untracked_files"]
+    if not isinstance(untracked_files, list):
+        raise TypeError("checkpoint untracked Git inventory must be a list")
+    untracked_paths: list[str] = []
+    for index, value in enumerate(untracked_files):
+        row = _strict_mapping(value, f"checkpoint untracked Git row {index}")
+        _expect_keys(
+            row,
+            {"path", "kind", "size_bytes", "sha256"},
+            f"checkpoint untracked Git row {index}",
+        )
+        untracked_paths.append(
+            _safe_relative_path(row["path"], f"checkpoint untracked Git row {index} path")
+        )
+        if row["kind"] not in {"file", "symlink"}:
+            raise ValueError(f"checkpoint untracked Git row {index} has unsupported kind {row['kind']!r}")
+        _non_negative_int(row["size_bytes"], f"checkpoint untracked Git row {index} size")
+        _stored_sha(row["sha256"], f"checkpoint untracked Git row {index} SHA256")
+    if untracked_paths != sorted(set(untracked_paths)):
+        raise ValueError("checkpoint untracked Git inventory must have unique paths in sorted order")
+    if git["dirty"] != bool(tracked_diff or untracked_files):
+        raise ValueError("checkpoint git dirty flag disagrees with its tracked diff and untracked inventory")
 
     environment = _strict_mapping(root["environment"], "checkpoint environment")
     _expect_keys(
@@ -722,8 +771,58 @@ def collect_git_metadata(repository_root: Path) -> dict[str, Any]:
     commit = commit_result.stdout.strip()
     if _GIT_COMMIT_RE.fullmatch(commit) is None:
         raise RuntimeError(f"git returned an invalid commit id for {root}: {commit!r}")
-    status = _run_git(root, "status", "--porcelain=v1", "--untracked-files=normal")
-    return {"commit": commit, "dirty": bool(status.stdout)}
+    tracked_diff = _run_git(
+        root,
+        "-c",
+        "core.quotepath=true",
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "HEAD",
+        "--",
+    ).stdout
+    untracked_output = _run_git_bytes(
+        root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ).stdout
+    untracked_paths = [os.fsdecode(value) for value in untracked_output.split(b"\0") if value]
+    untracked_files = [_untracked_file_metadata(root, relative) for relative in sorted(untracked_paths)]
+    return {
+        "format": GIT_PROVENANCE_FORMAT,
+        "commit": commit,
+        "dirty": bool(tracked_diff or untracked_files),
+        "tracked_diff": tracked_diff,
+        "tracked_diff_sha256": hashlib.sha256(tracked_diff.encode("utf-8")).hexdigest(),
+        "untracked_files": untracked_files,
+    }
+
+
+def _untracked_file_metadata(repository_root: Path, relative: str) -> dict[str, Any]:
+    normalized = _safe_relative_path(relative, "untracked Git path")
+    path = repository_root.joinpath(*PurePosixPath(normalized).parts)
+    file_stat = path.lstat()
+    if stat.S_ISREG(file_stat.st_mode):
+        kind = "file"
+        size_bytes = file_stat.st_size
+        content_sha256 = sha256_file(path)
+    elif stat.S_ISLNK(file_stat.st_mode):
+        kind = "symlink"
+        target = os.fsencode(os.readlink(path))
+        size_bytes = len(target)
+        content_sha256 = hashlib.sha256(target).hexdigest()
+    else:
+        raise ValueError(f"untracked Git path has unsupported filesystem type: {normalized}")
+    return {
+        "path": normalized,
+        "kind": kind,
+        "size_bytes": size_bytes,
+        "sha256": content_sha256,
+    }
 
 
 def _run_git(repository_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -736,6 +835,18 @@ def _run_git(repository_root: Path, *arguments: str) -> subprocess.CompletedProc
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)
+        raise RuntimeError(f"failed to collect required git metadata from {repository_root}: {detail}") from exc
+
+
+def _run_git_bytes(repository_root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repository_root), *arguments],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = os.fsdecode(exc.stderr).strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         raise RuntimeError(f"failed to collect required git metadata from {repository_root}: {detail}") from exc
 
 
@@ -819,6 +930,7 @@ def _freeze_json(value: Any) -> Any:
 
 __all__ = [
     "CHECKPOINT_FORMAT",
+    "GIT_PROVENANCE_FORMAT",
     "METADATA_FILENAME",
     "RNG_DIRECTORY",
     "CheckpointMetadata",

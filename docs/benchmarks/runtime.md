@@ -101,6 +101,21 @@ Use `PRISM_LIBERO_PYTHON` or `PRISM_CALVIN_PYTHON` to override the default
 sibling environment. Use `PRISM_SERVER_URI` to connect to a server other than
 `ws://127.0.0.1:9000`.
 
+Policy connections and the initial metadata handshake are bounded by
+`PRISM_POLICY_CONNECT_TIMEOUT_SECONDS` (default 30 seconds). Every inference
+round trip is bounded by `PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS` (default 120
+seconds). A timeout is a fatal infrastructure failure: evaluation aborts and
+the client does not silently count it as task failure or reconnect with hidden
+state.
+
+LIBERO camera resolution and video rate are explicit run settings:
+`PRISM_LIBERO_CAMERA_RESOLUTION` defaults to 448 and
+`PRISM_LIBERO_VIDEO_FPS` defaults to 30. The resolved values, including both
+timeouts, are stored in each result summary. Summary updates reuse metadata
+created once at evaluation start and publish through an fsynced temporary file
+plus atomic replacement, so an interrupted update cannot truncate the previous
+valid JSON result.
+
 The smoke profiles only validate configuration:
 
 ```bash

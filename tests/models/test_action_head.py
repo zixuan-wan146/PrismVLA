@@ -191,10 +191,10 @@ class _DifferentiablePreparedEncoder(nn.Module):
 
 
 def test_direct_action_head_requires_a_resolved_architecture_config():
-    with pytest.raises(ValueError, match="not yet accepted"):
+    with pytest.raises(ValueError, match="not resolved"):
         DirectActionHead(PrismArchitectureConfig(), state_dim=STATE_DIM)
 
-    with pytest.raises(ValueError, match="not yet accepted"):
+    with pytest.raises(ValueError, match="not resolved"):
         PrismPolicy(
             PrismArchitectureConfig(),
             _DifferentiablePreparedEncoder(_resolved_architecture()),

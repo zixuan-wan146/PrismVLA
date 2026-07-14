@@ -12,8 +12,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-import yaml
-
 from prism.data.benchmark_contracts import CALVIN_EVAL_SPLITS
 from prism.data.benchmark_contracts import CALVIN_STATISTICS_GROUP
 from prism.data.benchmark_contracts import CALVIN_TRAIN_SPLITS
@@ -29,6 +27,7 @@ from prism.data.normalization import load_statistics
 from prism.data.schema import DataSpec
 from prism.models.config import PrismArchitectureConfig
 from prism.models.config import load_architecture_config
+from prism.utils.yaml_loader import load_unique_yaml
 
 
 TRAIN_CONFIG_SNAPSHOT_FORMAT = "prism-resolved-train-config-v2"
@@ -164,32 +163,6 @@ class ResolvedTrainConfig:
         """Return a complete JSON-serializable checkpoint configuration snapshot."""
 
         return build_checkpoint_snapshot(self)
-
-
-class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys."""
-
-
-def _construct_unique_mapping(
-    loader: _UniqueKeySafeLoader,
-    node: yaml.nodes.MappingNode,
-    deep: bool = False,
-) -> dict[str, Any]:
-    mapping: dict[str, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        if not isinstance(key, str):
-            raise TypeError(f"YAML mapping keys must be strings, got {key!r}")
-        if key in mapping:
-            raise ValueError(f"duplicate YAML mapping key {key!r}")
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
 
 
 def load_train_config(
@@ -767,15 +740,7 @@ def _resolve_declared_path(
 
 
 def _load_yaml(path: Path) -> Any:
-    try:
-        return yaml.load(
-            path.read_text(encoding="utf-8"),
-            Loader=_UniqueKeySafeLoader,
-        )
-    except yaml.YAMLError as exc:
-        raise ValueError(f"invalid training YAML in {path}: {exc}") from exc
-    except (TypeError, ValueError) as exc:
-        raise type(exc)(f"invalid training YAML in {path}: {exc}") from exc
+    return load_unique_yaml(path, label="training YAML")
 
 
 def _strict_mapping(

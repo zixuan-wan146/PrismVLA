@@ -10,7 +10,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import torch.distributed as dist
 
 from prism.data.normalization import canonical_json_bytes
 from prism.training.artifact_io import MANIFEST_FILENAME
@@ -36,6 +38,10 @@ from prism.training.checkpoint_metadata import restore_rng_state
 from prism.training.checkpoint_metadata import validate_progress
 from prism.training.checkpoint_metadata import validate_rng_payload
 from prism.training.config import ResolvedTrainConfig
+
+
+class CheckpointError(RuntimeError):
+    """A checkpoint phase failed and the same error was propagated to every rank."""
 
 
 def save_checkpoint(
@@ -70,28 +76,64 @@ def save_checkpoint(
 
     git_metadata: dict[str, Any] | None = None
     environment: dict[str, Any] | None = None
-    if context["is_main_process"]:
+
+    def prepare_staging() -> None:
+        nonlocal git_metadata, environment
         repository_root = config.project_root if isinstance(config, ResolvedTrainConfig) else Path.cwd()
         git_metadata = collect_git_metadata(repository_root)
         environment = collect_environment_versions()
         target.parent.mkdir(parents=True, exist_ok=True)
         staging.mkdir()
-    accelerator.wait_for_everyone()
 
-    rng_payload = capture_rng_state(rank=context["rank"])
-    accelerator.save_state(str(staging))
-    accelerator.wait_for_everyone()
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="prepare checkpoint staging",
+        operation=prepare_staging,
+        main_process_only=True,
+    )
 
-    if not any(entry.is_file() for entry in staging.rglob("*")):
-        raise RuntimeError(
-            "Accelerator.save_state produced no files; prepare/register model, optimizer, "
-            "and scheduler before checkpointing"
-        )
+    rng_payload: dict[str, Any] | None = None
+
+    def capture_rank_rng() -> None:
+        nonlocal rng_payload
+        rng_payload = capture_rng_state(rank=context["rank"])
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="capture rank RNG state",
+        operation=capture_rank_rng,
+    )
+    assert rng_payload is not None
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="save Accelerate state",
+        operation=lambda: accelerator.save_state(str(staging)),
+    )
+
+    def validate_accelerator_state() -> None:
+        if not any(entry.is_file() for entry in staging.rglob("*")):
+            raise RuntimeError(
+                "Accelerator.save_state produced no files; prepare/register model, optimizer, "
+                "and scheduler before checkpointing"
+            )
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="validate Accelerate state",
+        operation=validate_accelerator_state,
+        main_process_only=True,
+    )
+
     rng_relative = f"{RNG_DIRECTORY}/rank-{context['rank']:05d}.json"
-    write_json_atomic(staging / rng_relative, rng_payload)
-    accelerator.wait_for_everyone()
 
-    if context["is_main_process"]:
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="write rank RNG state",
+        operation=lambda: write_json_atomic(staging / rng_relative, rng_payload),
+    )
+
+    def publish_checkpoint() -> None:
         assert git_metadata is not None
         assert environment is not None
         rng_rows: list[dict[str, Any]] = []
@@ -125,7 +167,13 @@ def save_checkpoint(
         fsync_directory(staging)
         os.replace(staging, target)
         fsync_directory(target.parent)
-    accelerator.wait_for_everyone()
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="publish checkpoint",
+        operation=publish_checkpoint,
+        main_process_only=True,
+    )
     return target
 
 
@@ -209,6 +257,46 @@ def _accelerator_context(accelerator: Any) -> dict[str, Any]:
     return {"rank": rank, "world_size": world_size, "is_main_process": is_main}
 
 
+def _run_collective_checkpoint_phase(
+    *,
+    context: Mapping[str, Any],
+    phase: str,
+    operation: Callable[[], None],
+    main_process_only: bool = False,
+) -> None:
+    """Run one phase and all-gather a serializable error before any later phase."""
+
+    rank = int(context["rank"])
+    world_size = int(context["world_size"])
+    local_error: dict[str, Any] | None = None
+    if not main_process_only or bool(context["is_main_process"]):
+        try:
+            operation()
+        except Exception as exc:
+            local_error = {
+                "rank": rank,
+                "exception": type(exc).__name__,
+                "message": str(exc),
+            }
+
+    errors: list[dict[str, Any] | None]
+    if world_size == 1:
+        errors = [local_error]
+    else:
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError("multi-process checkpointing requires an initialized torch.distributed group")
+        errors = [None] * world_size
+        dist.all_gather_object(errors, local_error)
+
+    failures = [error for error in errors if error is not None]
+    if failures:
+        failure = min(failures, key=lambda value: int(value["rank"]))
+        raise CheckpointError(
+            f"checkpoint phase {phase!r} failed on rank {failure['rank']}: "
+            f"{failure['exception']}: {failure['message']}"
+        ) from None
+
+
 def _checkpoint_path(path: str | Path) -> Path:
     candidate = Path(path).expanduser()
     if not candidate.name:
@@ -234,6 +322,7 @@ __all__ = [
     "MANIFEST_FORMAT",
     "METADATA_FILENAME",
     "CheckpointMetadata",
+    "CheckpointError",
     "TrainingProgress",
     "load_checkpoint",
     "read_checkpoint_metadata",

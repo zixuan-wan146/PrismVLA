@@ -1,5 +1,10 @@
 from prism.serve.backend import CheckpointPolicyBackend, PolicyBackend
-from prism.serve.client import InProcessPolicyClient, PolicyClient, WebSocketPolicyClient
+from prism.serve.client import (
+    InProcessPolicyClient,
+    PolicyClient,
+    PolicyClientTimeoutError,
+    WebSocketPolicyClient,
+)
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.loading import LoadedPolicyCheckpoint, load_policy_checkpoint
 from prism.serve.protocol import (
@@ -16,6 +21,7 @@ __all__ = [
     "LoadedPolicyCheckpoint",
     "PolicyBackend",
     "PolicyClient",
+    "PolicyClientTimeoutError",
     "PolicyRequest",
     "SparseHistoryBuffer",
     "SparseHistoryPayload",

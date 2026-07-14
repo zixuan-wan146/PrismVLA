@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 import websockets
 
-from prism.serve.client import InProcessPolicyClient, WebSocketPolicyClient
+from prism.serve.client import (
+    InProcessPolicyClient,
+    PolicyClientTimeoutError,
+    WebSocketPolicyClient,
+)
 from prism.serve.protocol import policy_request_from_mapping
 from prism.serve.wire import (
     metadata_envelope,
@@ -92,3 +96,50 @@ def test_websocket_policy_client_requires_context_manager():
     client = WebSocketPolicyClient("ws://127.0.0.1:1")
     with pytest.raises(RuntimeError, match="must be entered"):
         asyncio.run(client.infer(_request()))
+
+
+def test_websocket_policy_client_connection_metadata_timeout_is_fatal():
+    async def run_test():
+        async def handler(websocket):
+            await websocket.wait_closed()
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            client = WebSocketPolicyClient(
+                f"ws://127.0.0.1:{port}",
+                connect_timeout_seconds=0.05,
+            )
+            with pytest.raises(PolicyClientTimeoutError, match="fatal infrastructure error"):
+                async with client:
+                    raise AssertionError("client unexpectedly completed metadata handshake")
+
+    asyncio.run(run_test())
+
+
+def test_websocket_policy_client_inference_timeout_is_fatal_and_does_not_reconnect():
+    connections = 0
+
+    async def run_test():
+        async def handler(websocket):
+            nonlocal connections
+            connections += 1
+            await websocket.send(pack_message(metadata_envelope({"action_horizon": 1, "action_dim": 7})))
+            await websocket.recv()
+            await websocket.wait_closed()
+
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with WebSocketPolicyClient(
+                f"ws://127.0.0.1:{port}",
+                inference_timeout_seconds=0.05,
+            ) as client:
+                with pytest.raises(PolicyClientTimeoutError, match="will not reconnect implicitly"):
+                    await client.infer(_request())
+
+    asyncio.run(run_test())
+    assert connections == 1
+
+
+def test_websocket_policy_client_rejects_nonpositive_timeouts():
+    with pytest.raises(ValueError, match="finite and positive"):
+        WebSocketPolicyClient("ws://127.0.0.1:9000", inference_timeout_seconds=0)

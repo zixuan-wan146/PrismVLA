@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import subprocess
 from typing import Any
 
 import numpy as np
@@ -18,10 +19,13 @@ from prism.data.normalization import compute_statistics
 from prism.training.checkpoint import MANIFEST_FILENAME
 from prism.training.checkpoint import METADATA_FILENAME
 from prism.training.checkpoint import CheckpointMetadata
+from prism.training.checkpoint import CheckpointError
 from prism.training.checkpoint import TrainingProgress
 from prism.training.checkpoint import load_checkpoint
 from prism.training.checkpoint import read_checkpoint_metadata
 from prism.training.checkpoint import save_checkpoint
+from prism.training.checkpoint_metadata import GIT_PROVENANCE_FORMAT
+from prism.training.checkpoint_metadata import collect_git_metadata
 from prism.training.config import TRAIN_CONFIG_SNAPSHOT_FORMAT
 
 
@@ -285,6 +289,11 @@ def test_checkpoint_is_atomic_immutable_and_embeds_complete_metadata(tmp_path: P
     assert metadata.normalization_statistics["content_sha256"] == metadata.statistics_sha256
     assert len(metadata.git["commit"]) in {40, 64}
     assert isinstance(metadata.git["dirty"], bool)
+    assert metadata.git["format"] == GIT_PROVENANCE_FORMAT
+    assert isinstance(metadata.git["tracked_diff"], str)
+    assert len(metadata.git["tracked_diff_sha256"]) == 64
+    assert isinstance(metadata.git["untracked_files"], tuple)
+    assert metadata.git["dirty"] == bool(metadata.git["tracked_diff"] or metadata.git["untracked_files"])
     assert metadata.environment["accelerate"]
     assert metadata.environment["torch"]
 
@@ -307,7 +316,7 @@ def test_interrupted_save_never_creates_a_complete_checkpoint(tmp_path: Path):
     )
     destination = tmp_path / "step-00000001"
 
-    with pytest.raises(RuntimeError, match="injected save failure"):
+    with pytest.raises(CheckpointError, match="injected save failure"):
         save_checkpoint(
             destination,
             accelerator=accelerator,
@@ -319,6 +328,38 @@ def test_interrupted_save_never_creates_a_complete_checkpoint(tmp_path: Path):
     assert (tmp_path / ".step-00000001.incomplete").is_dir()
     with pytest.raises(ValueError, match="incomplete checkpoint"):
         read_checkpoint_metadata(tmp_path / ".step-00000001.incomplete")
+
+
+def test_dirty_git_provenance_stores_tracked_diff_and_untracked_hashes(tmp_path: Path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Prism Test"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "prism@example.invalid"], check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "baseline"], check=True)
+
+    tracked.write_text("modified\n", encoding="utf-8")
+    untracked = tmp_path / "untracked.txt"
+    untracked.write_text("untracked content\n", encoding="utf-8")
+
+    metadata = collect_git_metadata(tmp_path)
+
+    assert metadata["format"] == GIT_PROVENANCE_FORMAT
+    assert metadata["dirty"] is True
+    assert "-baseline" in metadata["tracked_diff"]
+    assert "+modified" in metadata["tracked_diff"]
+    assert metadata["tracked_diff_sha256"] == hashlib.sha256(
+        metadata["tracked_diff"].encode("utf-8")
+    ).hexdigest()
+    assert metadata["untracked_files"] == [
+        {
+            "path": "untracked.txt",
+            "kind": "file",
+            "size_bytes": len(b"untracked content\n"),
+            "sha256": hashlib.sha256(b"untracked content\n").hexdigest(),
+        }
+    ]
 
 
 def test_load_rejects_config_mismatch_and_corruption_before_accelerator_state(

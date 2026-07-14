@@ -4,6 +4,13 @@ from dataclasses import dataclass
 import os
 from typing import Mapping, MutableMapping
 
+from prism.utils.evaluation import (
+    DEFAULT_POLICY_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
+    env_float,
+    finite_positive_seconds,
+)
+
 DEFAULT_CALVIN_ROOT = "../benchmarks/calvin/runtime"
 DEFAULT_CALVIN_DATASET = f"{DEFAULT_CALVIN_ROOT}/dataset/task_ABC_D"
 
@@ -50,6 +57,8 @@ class CalvinClientConfig:
     video_dir: str
     log_file: str
     result_file: str
+    connect_timeout_seconds: float
+    inference_timeout_seconds: float
     num_sequences: int
     sequence_offset: int
     seed: int
@@ -77,6 +86,16 @@ class CalvinClientConfig:
             video_dir=video_dir,
             log_file=environ.get("PRISM_CALVIN_LOG_FILE", os.path.join(log_dir, f"{ckpt_name}.txt")),
             result_file=result_file,
+            connect_timeout_seconds=env_float(
+                environ,
+                "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS",
+                DEFAULT_POLICY_CONNECT_TIMEOUT_SECONDS,
+            ),
+            inference_timeout_seconds=env_float(
+                environ,
+                "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS",
+                DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
+            ),
             num_sequences=env_int(environ, "PRISM_CALVIN_NUM_SEQUENCES", 1000),
             sequence_offset=env_int(environ, "PRISM_CALVIN_SEQUENCE_OFFSET", 0),
             seed=env_int(environ, "PRISM_CALVIN_SEED", 42),
@@ -99,6 +118,14 @@ class CalvinClientConfig:
             raise ValueError(f"PRISM_CALVIN_SEQUENCE_OFFSET must be non-negative, got {self.sequence_offset}")
         if self.video_fps <= 0:
             raise ValueError(f"PRISM_CALVIN_VIDEO_FPS must be positive, got {self.video_fps}")
+        finite_positive_seconds(
+            self.connect_timeout_seconds,
+            "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS",
+        )
+        finite_positive_seconds(
+            self.inference_timeout_seconds,
+            "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS",
+        )
         if self.mujoco_gl not in {"osmesa", "egl", "glfw"}:
             raise ValueError(f"PRISM_MUJOCO_GL must be one of osmesa, egl, glfw; got {self.mujoco_gl!r}")
 

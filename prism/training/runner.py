@@ -221,6 +221,7 @@ def run_training_loop(
         raise ValueError("accelerator.num_processes must be positive")
 
     optimizer.zero_grad(set_to_none=True)
+    loss_sum: torch.Tensor | None = None
     loss_normalizer_sum: torch.Tensor | None = None
     metric_sums: dict[str, ScalarStatistic] = {}
 
@@ -279,7 +280,8 @@ def run_training_loop(
                     raise TypeError("policy output must expose ActionLossStatistics as loss_statistics")
                 _validate_loss_statistics(statistics)
                 accelerator.backward(statistics.loss_sum)
-                loss_normalizer_sum, metric_sums = _accumulate_statistics(
+                loss_sum, loss_normalizer_sum, metric_sums = _accumulate_statistics(
+                    loss_sum,
                     loss_normalizer_sum,
                     metric_sums,
                     statistics,
@@ -287,8 +289,9 @@ def run_training_loop(
                 micro_step += 1
 
                 if accelerator.sync_gradients:
-                    global_loss_normalizer, reduced_metrics = _reduce_statistics(
+                    global_loss_sum, global_loss_normalizer, reduced_metrics = _reduce_statistics(
                         accelerator,
+                        loss_sum,
                         loss_normalizer_sum,
                         metric_sums,
                     )
@@ -298,9 +301,13 @@ def run_training_loop(
                         world_size=world_size,
                         gradient_accumulation_steps=int(accelerator.gradient_accumulation_steps),
                     )
-                    accelerator.clip_grad_norm_(
+                    gradient_norm = accelerator.clip_grad_norm_(
                         model.parameters(),
                         config.trainer.max_grad_norm,
+                    )
+                    _require_finite_optimizer_boundary(
+                        global_loss_sum=global_loss_sum,
+                        gradient_norm=gradient_norm,
                     )
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
@@ -339,6 +346,7 @@ def run_training_loop(
                                 config=config,
                                 progress=current_progress,
                             )
+                    loss_sum = None
                     loss_normalizer_sum = None
                     metric_sums = {}
 
@@ -434,11 +442,14 @@ def _validate_loss_statistics(statistics: ActionLossStatistics) -> None:
 
 
 def _accumulate_statistics(
+    loss_sum: torch.Tensor | None,
     loss_normalizer_sum: torch.Tensor | None,
     metric_sums: dict[str, ScalarStatistic],
     statistics: ActionLossStatistics,
-) -> tuple[torch.Tensor, dict[str, ScalarStatistic]]:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, ScalarStatistic]]:
+    detached_loss = statistics.loss_sum.detach().float()
     normalizer = statistics.valid_element_count.detach().float()
+    loss_sum = detached_loss.clone() if loss_sum is None else loss_sum + detached_loss
     if loss_normalizer_sum is None:
         loss_normalizer_sum = normalizer.clone()
     else:
@@ -469,20 +480,21 @@ def _accumulate_statistics(
             )
             for name, statistic in parsed.items()
         }
-    return loss_normalizer_sum, metric_sums
+    return loss_sum, loss_normalizer_sum, metric_sums
 
 
 def _reduce_statistics(
     accelerator: Any,
+    loss_sum: torch.Tensor | None,
     loss_normalizer_sum: torch.Tensor | None,
     metric_sums: Mapping[str, ScalarStatistic],
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    if loss_normalizer_sum is None or not metric_sums:
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+    if loss_sum is None or loss_normalizer_sum is None or not metric_sums:
         raise RuntimeError("optimizer synchronization has no policy metrics to reduce")
 
     names = sorted(metric_sums)
     packed = torch.stack(
-        [loss_normalizer_sum]
+        [loss_sum, loss_normalizer_sum]
         + [metric_sums[name].numerator for name in names]
         + [metric_sums[name].denominator for name in names]
     )
@@ -490,12 +502,12 @@ def _reduce_statistics(
     metric_count = len(names)
     reduced_metrics = {
         name: ScalarStatistic(
-            numerator=reduced[1 + index],
-            denominator=reduced[1 + metric_count + index],
+            numerator=reduced[2 + index],
+            denominator=reduced[2 + metric_count + index],
         ).value
         for index, name in enumerate(names)
     }
-    return reduced[0], reduced_metrics
+    return reduced[0], reduced[1], reduced_metrics
 
 
 def _normalize_accumulated_gradients(
@@ -516,6 +528,27 @@ def _normalize_accumulated_gradients(
         for parameter in parameters:
             if parameter.grad is not None:
                 parameter.grad.mul_(gradient_scale)
+
+
+def _require_finite_optimizer_boundary(
+    *,
+    global_loss_sum: torch.Tensor,
+    gradient_norm: torch.Tensor,
+) -> None:
+    """Synchronize once at an optimizer boundary and reject poisoned updates."""
+
+    if global_loss_sum.ndim != 0:
+        raise TypeError("global loss sum must be a scalar tensor")
+    if not isinstance(gradient_norm, torch.Tensor) or gradient_norm.ndim != 0:
+        raise TypeError("gradient norm must be a scalar tensor")
+    values = torch.stack(
+        (
+            global_loss_sum.detach().to(dtype=torch.float32),
+            gradient_norm.detach().to(device=global_loss_sum.device, dtype=torch.float32),
+        )
+    )
+    if not bool(torch.isfinite(values).all().item()):
+        raise FloatingPointError("non-finite global loss or gradient norm before optimizer.step()")
 
 
 def _log_metrics(

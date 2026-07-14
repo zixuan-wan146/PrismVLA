@@ -4,7 +4,6 @@ import argparse
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
-import json
 import logging
 import math
 import os
@@ -21,6 +20,7 @@ from prism.data.normalization import decode_gripper_for_environment
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
+from prism.utils.result_writer import write_json_result_atomic
 from prism.utils.run_metadata import build_run_metadata
 from prism.utils.seeding import set_global_seed
 
@@ -51,7 +51,7 @@ def to_libero_action(action: Sequence[float], control_dim: int = LIBERO_CONTROL_
         raise ValueError(f"Action dimension {len(action)} is smaller than LIBERO control dim {control_dim}")
     if control_dim != LIBERO_CONTROL_DIM:
         raise ValueError(f"LIBERO control dim must be {LIBERO_CONTROL_DIM}, got {control_dim}")
-    values = np.asarray(action[:control_dim], dtype=np.float32)
+    values = np.array(action[:control_dim], dtype=np.float32, copy=True)
     if not np.isfinite(values).all():
         raise ValueError("LIBERO action must contain only finite values")
     values[:6] = np.clip(values[:6], LIBERO_MOTION_LOW, LIBERO_MOTION_HIGH)
@@ -172,7 +172,6 @@ def write_result_summary(
     metadata: Mapping[str, Any] | None = None,
 ) -> Path:
     result_path = Path(path).expanduser()
-    result_path.parent.mkdir(parents=True, exist_ok=True)
     episodes = [_episode_to_dict(result) for result in results]
     payload = {
         "config": _serialize_config(config),
@@ -180,9 +179,7 @@ def write_result_summary(
         "summary": summarize_episode_results(episodes),
         "episodes": episodes,
     }
-    with result_path.open("w") as file:
-        json.dump(payload, file, indent=2)
-    return result_path
+    return write_json_result_atomic(result_path, payload)
 
 
 def _summarize_subset(episodes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -255,7 +252,7 @@ def configure_logging(config: LiberoClientConfig) -> None:
     )
 
 
-def get_libero_env(task: Any, config: LiberoClientConfig, resolution: int = 448, seed: int | None = None):
+def get_libero_env(task: Any, config: LiberoClientConfig, seed: int | None = None):
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
 
@@ -263,8 +260,8 @@ def get_libero_env(task: Any, config: LiberoClientConfig, resolution: int = 448,
     task_bddl_file = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env = OffScreenRenderEnv(
         bddl_file_name=task_bddl_file,
-        camera_heights=resolution,
-        camera_widths=resolution,
+        camera_heights=config.camera_resolution,
+        camera_widths=config.camera_resolution,
     )
     env.seed(seed)
     return env, task.language
@@ -312,7 +309,11 @@ async def run(
     total_success_decision_steps = 0
     suite_results: list[EpisodeResult] = []
 
-    client = policy_client or WebSocketPolicyClient(server_url)
+    client = policy_client or WebSocketPolicyClient(
+        server_url,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        inference_timeout_seconds=config.inference_timeout_seconds,
+    )
     async with client:
         LOG.info("===========================Start task suite %s========================", task_suite_name)
         for task_id in range(task_start, task_stop):
@@ -321,7 +322,7 @@ async def run(
             initial_states = task_suite.get_task_init_states(task_id)
             env = None
             try:
-                env, task_description = get_libero_env(task, config, resolution=448, seed=config.seed)
+                env, task_description = get_libero_env(task, config, seed=config.seed)
                 LOG.info("\n========= Start task%s: %s =========", task_id + 1, task_description)
                 task_success = 0
                 episode_start = min(config.episode_offset, len(initial_states))
@@ -357,7 +358,7 @@ async def run(
                     video_path = save_video(
                         frames,
                         f"task{task_id + 1}_episode{episode_id + 1}.mp4",
-                        fps=30,
+                        fps=config.video_fps,
                         save_dir=os.path.join(config.video_dir, task_suite_name),
                     )
                     total_decision_steps += decision_steps
@@ -506,6 +507,7 @@ def evaluate(config: LiberoClientConfig | None = None) -> int:
     configure_logging(config)
     np.random.seed(config.seed)
     random.seed(config.seed)
+    run_metadata = build_run_metadata()
 
     all_results: list[EpisodeResult] = []
     for name, max_steps in zip(config.task_suites, config.max_steps):
@@ -521,7 +523,12 @@ def evaluate(config: LiberoClientConfig | None = None) -> int:
                 )
             )
         )
-        result_path = write_result_summary(config.result_file, config=config, results=all_results)
+        result_path = write_result_summary(
+            config.result_file,
+            config=config,
+            results=all_results,
+            metadata=run_metadata,
+        )
         LOG.info("LIBERO result summary saved: %s", result_path)
     return 0
 

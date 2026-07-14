@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
+from prism.utils.yaml_loader import load_unique_yaml
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,14 @@ class Qwen35BackboneConfig:
     local_files_only: bool = False
 
     def validate(self) -> None:
+        _non_empty_text(self.model_name, "backbone.model_name")
+        for name in ("num_hidden_layers", "hidden_size", "num_action_queries", "image_size"):
+            _exact_int(getattr(self, name), f"backbone.{name}")
+        _non_empty_text(self.torch_dtype, "backbone.torch_dtype")
+        if type(self.local_files_only) is not bool:
+            raise TypeError(
+                f"backbone.local_files_only must be a boolean, got {self.local_files_only!r}"
+            )
         if self.num_hidden_layers != 16:
             raise ValueError("The accepted Qwen3.5 baseline requires exactly 16 retained layers")
         if self.hidden_size != 1024:
@@ -43,6 +52,18 @@ class HistoryQFormerConfig:
     dropout: float = 0.0
 
     def validate(self) -> None:
+        for name in (
+            "input_dim",
+            "hidden_size",
+            "num_layers",
+            "num_heads",
+            "mlp_ratio",
+            "num_memory_tokens",
+            "num_history_frames",
+            "max_relative_age",
+        ):
+            _exact_int(getattr(self, name), f"history.{name}")
+        _finite_number(self.dropout, "history.dropout")
         if self.input_dim != 1024 or self.hidden_size != 512:
             raise ValueError("The accepted history widths are input_dim=1024 and hidden_size=512")
         if self.num_layers != 2 or self.num_heads != 4:
@@ -70,6 +91,12 @@ class TemporalContextConfig:
         return tuple(self.replan_stride - offset for offset in self.history_capture_offsets)
 
     def validate(self) -> None:
+        _exact_int(self.action_horizon, "temporal.action_horizon")
+        _exact_int(self.replan_stride, "temporal.replan_stride")
+        if type(self.history_capture_offsets) is not tuple or len(self.history_capture_offsets) != 2:
+            raise TypeError("temporal.history_capture_offsets must be a two-integer tuple")
+        for index, value in enumerate(self.history_capture_offsets):
+            _exact_int(value, f"temporal.history_capture_offsets[{index}]")
         if self.action_horizon != 8 or self.replan_stride != 8:
             raise ValueError("The accepted runtime contract requires action_horizon=replan_stride=8")
         if self.history_capture_offsets != (2, 5):
@@ -87,6 +114,10 @@ class DirectActionHeadConfig:
     ffn_ratio: int | None = None
 
     def validate(self) -> None:
+        _non_empty_text(self.objective, "action_head.objective")
+        _exact_int(self.action_dim, "action_head.action_dim")
+        _exact_int(self.gripper_index, "action_head.gripper_index")
+        _finite_number(self.gripper_threshold, "action_head.gripper_threshold")
         if self.objective != "direct_masked_l1":
             raise ValueError("The accepted action objective is direct_masked_l1")
         if self.action_dim != 7 or self.gripper_index != 6:
@@ -98,6 +129,8 @@ class DirectActionHeadConfig:
             ("num_attention_heads", self.num_attention_heads),
             ("ffn_ratio", self.ffn_ratio),
         ):
+            if value is not None:
+                _exact_int(value, f"action_head.{name}")
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive when specified")
         if (
@@ -113,7 +146,19 @@ class DirectActionHeadConfig:
             name for name in ("action_hidden_size", "num_attention_heads", "ffn_ratio") if getattr(self, name) is None
         ]
         if missing:
-            raise ValueError(f"Action policy dimensions are not yet accepted in the architecture config: {missing}")
+            raise ValueError(f"Action policy dimensions are not resolved in the architecture config: {missing}")
+
+    def resolved_dimensions(self) -> tuple[int, int, int]:
+        """Return exact configured capacity values after validation."""
+
+        self.require_resolved()
+        hidden_size = self.action_hidden_size
+        num_heads = self.num_attention_heads
+        ffn_ratio = self.ffn_ratio
+        assert hidden_size is not None
+        assert num_heads is not None
+        assert ffn_ratio is not None
+        return hidden_size, num_heads, ffn_ratio
 
 
 @dataclass(frozen=True)
@@ -130,6 +175,8 @@ class PrismArchitectureConfig:
         self.history.validate()
         self.temporal.validate()
         self.action_head.validate()
+        _exact_int(self.num_bridge_layers, "bridge.num_layers")
+        _finite_number(self.memory_gate_init, "bridge.memory_gate_init")
         if self.num_bridge_layers != self.backbone.num_hidden_layers:
             raise ValueError("Bridge depth must match retained Qwen depth")
         if self.memory_gate_init != 0.1:
@@ -142,7 +189,7 @@ class PrismArchitectureConfig:
 
 def load_architecture_config(path: str | Path) -> PrismArchitectureConfig:
     config_path = Path(path)
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = load_unique_yaml(config_path, label="architecture YAML") or {}
     return architecture_config_from_mapping(raw, label=str(config_path))
 
 
@@ -181,7 +228,7 @@ def architecture_config_from_mapping(
     history = HistoryQFormerConfig(**_mapping(raw.get("history"), "history"))
     temporal_values = _mapping(raw.get("temporal"), "temporal")
     if "history_capture_offsets" in temporal_values:
-        temporal_values["history_capture_offsets"] = tuple(temporal_values["history_capture_offsets"])
+        temporal_values["history_capture_offsets"] = _integer_tuple(temporal_values["history_capture_offsets"])
     temporal = TemporalContextConfig(**temporal_values)
     action_head = DirectActionHeadConfig(**_mapping(raw.get("action_head"), "action_head"))
     config = PrismArchitectureConfig(
@@ -189,8 +236,8 @@ def architecture_config_from_mapping(
         history=history,
         temporal=temporal,
         action_head=action_head,
-        num_bridge_layers=int(raw.get("num_bridge_layers", bridge.get("num_layers", 16))),
-        memory_gate_init=float(raw.get("memory_gate_init", bridge.get("memory_gate_init", 0.1))),
+        num_bridge_layers=raw.get("num_bridge_layers", bridge.get("num_layers", 16)),
+        memory_gate_init=raw.get("memory_gate_init", bridge.get("memory_gate_init", 0.1)),
     )
     config.validate()
     return config
@@ -202,3 +249,33 @@ def _mapping(value: Any, field_name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be a mapping")
     return dict(value)
+
+
+def _integer_tuple(value: Any) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("temporal.history_capture_offsets must be a sequence of integers")
+    output = tuple(value)
+    for index, item in enumerate(output):
+        _exact_int(item, f"temporal.history_capture_offsets[{index}]")
+    return output
+
+
+def _exact_int(value: Any, label: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{label} must be an integer, got {value!r}")
+    return value
+
+
+def _finite_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{label} must be numeric, got {value!r}")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite, got {value!r}")
+    return parsed
+
+
+def _non_empty_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"{label} must be non-empty text, got {value!r}")
+    return value

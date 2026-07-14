@@ -4,6 +4,13 @@ from dataclasses import dataclass
 import os
 from typing import Mapping, MutableMapping
 
+from prism.utils.evaluation import (
+    DEFAULT_POLICY_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
+    env_float,
+    finite_positive_seconds,
+)
+
 
 DEFAULT_TASK_SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
 DEFAULT_MAX_STEPS_BY_TASK_SUITE = {
@@ -86,6 +93,10 @@ class LiberoClientConfig:
     video_dir: str
     log_file: str
     result_file: str
+    camera_resolution: int
+    video_fps: int
+    connect_timeout_seconds: float
+    inference_timeout_seconds: float
     num_episodes: int
     task_limit: int
     task_offset: int
@@ -120,6 +131,18 @@ class LiberoClientConfig:
             video_dir=video_dir,
             log_file=log_file,
             result_file=result_file,
+            camera_resolution=env_int(environ, "PRISM_LIBERO_CAMERA_RESOLUTION", 448),
+            video_fps=env_int(environ, "PRISM_LIBERO_VIDEO_FPS", 30),
+            connect_timeout_seconds=env_float(
+                environ,
+                "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS",
+                DEFAULT_POLICY_CONNECT_TIMEOUT_SECONDS,
+            ),
+            inference_timeout_seconds=env_float(
+                environ,
+                "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS",
+                DEFAULT_POLICY_INFERENCE_TIMEOUT_SECONDS,
+            ),
             num_episodes=env_int(environ, "PRISM_LIBERO_EPISODES", 10),
             task_limit=env_int(environ, "PRISM_LIBERO_TASK_LIMIT", 0),
             task_offset=env_int(environ, "PRISM_LIBERO_TASK_OFFSET", 0),
@@ -135,6 +158,20 @@ class LiberoClientConfig:
             raise ValueError(f"PRISM_LIBERO_HORIZON must equal the architecture horizon 8, got {self.horizon}")
         if self.num_episodes <= 0:
             raise ValueError(f"PRISM_LIBERO_EPISODES must be positive, got {self.num_episodes}")
+        if self.camera_resolution <= 0:
+            raise ValueError(
+                f"PRISM_LIBERO_CAMERA_RESOLUTION must be positive, got {self.camera_resolution}"
+            )
+        if self.video_fps <= 0:
+            raise ValueError(f"PRISM_LIBERO_VIDEO_FPS must be positive, got {self.video_fps}")
+        finite_positive_seconds(
+            self.connect_timeout_seconds,
+            "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS",
+        )
+        finite_positive_seconds(
+            self.inference_timeout_seconds,
+            "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS",
+        )
         if self.task_limit < 0:
             raise ValueError(f"PRISM_LIBERO_TASK_LIMIT must be non-negative, got {self.task_limit}")
         if self.task_offset < 0:

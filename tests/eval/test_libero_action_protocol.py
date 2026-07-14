@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from experiments.libero.eval import (
@@ -71,3 +72,14 @@ def test_to_libero_action_clamps_motion_and_converts_gripper_sign():
 def test_to_libero_action_rejects_nonfinite_values():
     with pytest.raises(ValueError, match="finite"):
         to_libero_action([0, 0, 0, float("nan"), 0, 0, 0.5])
+
+
+def test_to_libero_action_does_not_mutate_or_require_writable_input():
+    action = np.array([0, 2, -2, 0, 0, 0, 0.6], dtype=np.float32)
+    expected = action.copy()
+
+    assert to_libero_action(action) == [0, 1, -1, 0, 0, 0, -1.0]
+    np.testing.assert_array_equal(action, expected)
+
+    action.setflags(write=False)
+    assert to_libero_action(action) == [0, 1, -1, 0, 0, 0, -1.0]

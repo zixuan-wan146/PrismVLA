@@ -17,6 +17,8 @@ def test_default_calvin_config_matches_abc_d_eval_defaults():
     assert config.horizon == 8
     assert config.max_steps_per_subtask == 360
     assert config.save_video is False
+    assert config.connect_timeout_seconds == 30.0
+    assert config.inference_timeout_seconds == 120.0
 
 
 def test_calvin_config_prefers_shared_server_uri():
@@ -38,6 +40,8 @@ def test_calvin_config_can_override_paths_and_counts():
             "PRISM_CALVIN_NUM_SEQUENCES": "3",
             "PRISM_CALVIN_SEQUENCE_OFFSET": "7",
             "PRISM_CALVIN_SAVE_VIDEO": "true",
+            "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS": "8.5",
+            "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS": "45",
         }
     )
 
@@ -45,6 +49,17 @@ def test_calvin_config_can_override_paths_and_counts():
     assert config.num_sequences == 3
     assert config.sequence_offset == 7
     assert config.save_video is True
+    assert config.connect_timeout_seconds == 8.5
+    assert config.inference_timeout_seconds == 45.0
+
+
+def test_calvin_rejects_nonpositive_policy_timeout():
+    try:
+        CalvinClientConfig.from_env({"PRISM_POLICY_CONNECT_TIMEOUT_SECONDS": "-1"})
+    except ValueError as exc:
+        assert "finite and positive" in str(exc)
+    else:
+        raise AssertionError("Expected negative connection timeout to raise ValueError")
 
 
 def test_configure_calvin_environment_sets_calvin_root_and_egl_platform():

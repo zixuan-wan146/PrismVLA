@@ -128,9 +128,7 @@ class LayerwiseQueryMemoryBridge(nn.Module):
         super().__init__()
         architecture.validate_for_policy()
         action_config = architecture.action_head
-        action_hidden_size = int(action_config.action_hidden_size)
-        num_heads = int(action_config.num_attention_heads)
-        ffn_ratio = int(action_config.ffn_ratio)
+        action_hidden_size, num_heads, ffn_ratio = action_config.resolved_dimensions()
 
         self.architecture = architecture
         self.num_layers = architecture.num_bridge_layers

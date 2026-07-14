@@ -28,6 +28,7 @@ action_head:
   action_dim: 7
   gripper_index: 6
   gripper_threshold: 0.5
+  # Provisional runnable capacity; benchmark evidence must decide later revisions.
   action_hidden_size: 512
   num_attention_heads: 8
   ffn_ratio: 4

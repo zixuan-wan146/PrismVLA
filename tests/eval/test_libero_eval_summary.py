@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import experiments.libero.eval as libero_eval
 
 from experiments.libero.eval import (
     EpisodeResult,
@@ -128,3 +131,38 @@ def test_default_run_metadata_resolves_repository_root(monkeypatch):
     expected_root = Path(run_metadata.__file__).resolve().parents[2]
     assert observed_roots
     assert all(root == expected_root for root in observed_roots)
+
+
+def test_libero_evaluation_reuses_one_start_metadata_record(monkeypatch, tmp_path):
+    metadata_calls = 0
+    observed_metadata = []
+
+    def fake_metadata():
+        nonlocal metadata_calls
+        metadata_calls += 1
+        return {"created_at_utc": "one-start-time"}
+
+    async def fake_run(*args, **kwargs):
+        return []
+
+    def fake_write(path, **kwargs):
+        observed_metadata.append(kwargs["metadata"])
+        return Path(path)
+
+    monkeypatch.setattr(libero_eval, "configure_logging", lambda config: None)
+    monkeypatch.setattr(libero_eval, "configure_mujoco_environment", lambda config: None)
+    monkeypatch.setattr(libero_eval, "build_run_metadata", fake_metadata)
+    monkeypatch.setattr(libero_eval, "run", fake_run)
+    monkeypatch.setattr(libero_eval, "write_result_summary", fake_write)
+    config = libero_eval.LiberoClientConfig.from_env(
+        {
+            "PRISM_LIBERO_TASK_SUITES": "libero_spatial,libero_goal",
+            "PRISM_LIBERO_MAX_STEPS": "1,1",
+            "PRISM_LIBERO_RESULT_FILE": str(tmp_path / "results.json"),
+        }
+    )
+
+    assert libero_eval.evaluate(config) == 0
+    assert metadata_calls == 1
+    assert len(observed_metadata) == 2
+    assert observed_metadata[0] is observed_metadata[1]

@@ -18,6 +18,10 @@ def test_default_config_matches_documented_smoke_server():
     assert config.episode_offset == 0
     assert config.mujoco_gl == "osmesa"
     assert config.result_file == "./log_file/Prism_libero_all_results.json"
+    assert config.camera_resolution == 448
+    assert config.video_fps == 30
+    assert config.connect_timeout_seconds == 30.0
+    assert config.inference_timeout_seconds == 120.0
 
 
 def test_single_max_steps_value_expands_to_all_task_suites():
@@ -64,6 +68,31 @@ def test_result_file_can_be_overridden():
     config = LiberoClientConfig.from_env({"PRISM_LIBERO_RESULT_FILE": "run_outputs/results.json"})
 
     assert config.result_file == "run_outputs/results.json"
+
+
+def test_rendering_and_policy_timeouts_can_be_overridden():
+    config = LiberoClientConfig.from_env(
+        {
+            "PRISM_LIBERO_CAMERA_RESOLUTION": "320",
+            "PRISM_LIBERO_VIDEO_FPS": "24",
+            "PRISM_POLICY_CONNECT_TIMEOUT_SECONDS": "4.5",
+            "PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS": "19",
+        }
+    )
+
+    assert config.camera_resolution == 320
+    assert config.video_fps == 24
+    assert config.connect_timeout_seconds == 4.5
+    assert config.inference_timeout_seconds == 19.0
+
+
+def test_nonpositive_policy_timeout_is_rejected():
+    try:
+        LiberoClientConfig.from_env({"PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS": "0"})
+    except ValueError as exc:
+        assert "finite and positive" in str(exc)
+    else:
+        raise AssertionError("Expected zero inference timeout to raise ValueError")
 
 
 def test_invalid_max_steps_count_is_rejected():

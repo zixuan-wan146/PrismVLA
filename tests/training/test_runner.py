@@ -332,6 +332,32 @@ def test_masked_loss_and_metrics_use_global_counts_across_micro_batches() -> Non
     assert metrics["gripper_transition_recall"] == pytest.approx(1.0)
 
 
+def test_nonfinite_loss_or_gradients_fail_before_optimizer_and_scheduler_step() -> None:
+    model = _TinyPolicy()
+    optimizer = _CountingSGD(model.parameters())
+    scheduler = _CountingScheduler()
+    accelerator = _FakeAccelerator([True])
+
+    with pytest.raises(
+        FloatingPointError,
+        match=r"non-finite global loss or gradient norm before optimizer\.step",
+    ):
+        runner.run_training_loop(
+            config=_config(max_steps=1),
+            accelerator=accelerator,
+            model=model,
+            collator=lambda raw: raw,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            dataset=[0],
+            dataloader=_loader([float("nan")], batch_size=1),
+        )
+
+    assert accelerator.clip_calls == 1
+    assert optimizer.step_calls == 0
+    assert scheduler.step_calls == 0
+
+
 def test_non_boundary_micro_step_resume_is_rejected() -> None:
     model = _TinyPolicy()
     progress = TrainingProgress(

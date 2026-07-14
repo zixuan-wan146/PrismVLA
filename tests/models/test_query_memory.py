@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 import torch
@@ -58,6 +59,51 @@ def test_checkpoint_canonical_architecture_round_trips_without_yaml():
     reconstructed = architecture_config_from_mapping(asdict(expected))
 
     assert reconstructed == expected
+
+
+def test_architecture_yaml_rejects_duplicate_keys(tmp_path: Path):
+    path = tmp_path / "duplicate.yaml"
+    path.write_text(
+        "backbone:\n  image_size: 384\n  image_size: 320\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate YAML mapping key 'image_size'"):
+        load_architecture_config(path)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        (("history", "num_layers"), True),
+        (("action_head", "ffn_ratio"), 4.5),
+        (("num_bridge_layers",), 16.0),
+    ],
+)
+def test_architecture_integer_fields_reject_booleans_and_fractional_values(
+    field_path: tuple[str, ...],
+    value: object,
+):
+    raw = asdict(load_architecture_config("configs/model/qwen35_query_memory.yaml"))
+    target = raw
+    for key in field_path[:-1]:
+        target = target[key]
+    target[field_path[-1]] = value
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        architecture_config_from_mapping(raw)
+
+
+def test_architecture_boolean_and_float_fields_are_exact_and_finite():
+    raw = asdict(load_architecture_config("configs/model/qwen35_query_memory.yaml"))
+    raw["backbone"]["local_files_only"] = 0
+    with pytest.raises(TypeError, match="must be a boolean"):
+        architecture_config_from_mapping(raw)
+
+    raw = asdict(load_architecture_config("configs/model/qwen35_query_memory.yaml"))
+    raw["history"]["dropout"] = float("nan")
+    with pytest.raises(ValueError, match="must be finite"):
+        architecture_config_from_mapping(raw)
 
 
 def test_gather_layerwise_queries_excludes_h0_and_preserves_all_16_levels():
@@ -234,5 +280,5 @@ def test_bridge_casts_bfloat16_conditioning_and_preserves_memory_gradients():
 
 
 def test_layerwise_bridge_requires_resolved_action_dimensions():
-    with pytest.raises(ValueError, match="not yet accepted"):
+    with pytest.raises(ValueError, match="not resolved"):
         LayerwiseQueryMemoryBridge(PrismArchitectureConfig())

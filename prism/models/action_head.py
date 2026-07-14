@@ -23,7 +23,7 @@ class DirectActionHead(nn.Module):
             raise ValueError("state_dim must be a positive integer")
 
         action_config = architecture.action_head
-        hidden_size = int(action_config.action_hidden_size)
+        hidden_size, _num_heads, _ffn_ratio = action_config.resolved_dimensions()
         self.architecture = architecture
         self.state_dim = state_dim
         self.action_horizon = architecture.temporal.action_horizon

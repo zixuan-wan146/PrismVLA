@@ -23,6 +23,7 @@ from prism.data.normalization import decode_gripper_for_environment
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
 from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
 from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
+from prism.utils.result_writer import write_json_result_atomic
 from prism.utils.run_metadata import build_run_metadata
 from prism.utils.seeding import set_global_seed
 
@@ -59,7 +60,7 @@ def to_calvin_action(
         raise ValueError(f"Action dimension {len(action)} is smaller than CALVIN control dim {control_dim}")
     if control_dim != CALVIN_CONTROL_DIM:
         raise ValueError(f"CALVIN control dim must be {CALVIN_CONTROL_DIM}, got {control_dim}")
-    values = np.asarray(action[:control_dim], dtype=np.float32)
+    values = np.array(action[:control_dim], dtype=np.float32, copy=True)
     if not np.isfinite(values).all():
         raise ValueError("CALVIN action must contain only finite values")
     values[:6] = np.clip(values[:6], CALVIN_RELATIVE_MOTION_LOW, CALVIN_RELATIVE_MOTION_HIGH)
@@ -188,7 +189,6 @@ def write_result_summary(
     metadata: Mapping[str, Any] | None = None,
 ) -> Path:
     result_path = Path(path).expanduser()
-    result_path.parent.mkdir(parents=True, exist_ok=True)
     sequences = [_sequence_to_dict(result) for result in results]
     payload = {
         "config": _serialize_config(config),
@@ -196,10 +196,7 @@ def write_result_summary(
         "summary": summarize_sequence_results(sequences),
         "sequences": sequences,
     }
-    with result_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    return result_path
+    return write_json_result_atomic(result_path, payload)
 
 
 def _chain_success_rates(successful_counts: Sequence[int], *, max_chain_length: int) -> dict[str, float]:
@@ -435,6 +432,7 @@ async def run_calvin_eval(
     configure_logging(config)
     random.seed(config.seed)
     np.random.seed(config.seed)
+    run_metadata = build_run_metadata()
 
     LOG.info("Loading CALVIN task oracle and validation annotations")
     task_oracle = load_task_oracle(config)
@@ -444,7 +442,11 @@ async def run_calvin_eval(
     LOG.info("Creating CALVIN environment from %s", config.dataset_path)
     env = make_env(config)
     results: list[SequenceResult] = []
-    client = policy_client or WebSocketPolicyClient(config.server_url)
+    client = policy_client or WebSocketPolicyClient(
+        config.server_url,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        inference_timeout_seconds=config.inference_timeout_seconds,
+    )
     try:
         async with client:
             LOG.info("Policy client ready for %s", config.server_url)
@@ -463,7 +465,12 @@ async def run_calvin_eval(
                     log=LOG,
                 )
                 results.append(result)
-                result_path = write_result_summary(config.result_file, config=config, results=results)
+                result_path = write_result_summary(
+                    config.result_file,
+                    config=config,
+                    results=results,
+                    metadata=run_metadata,
+                )
                 LOG.info(
                     "Sequence %s complete: %s/%s subtasks, results saved to %s",
                     sequence_id,

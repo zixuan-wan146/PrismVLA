@@ -2,20 +2,25 @@
 
 All training, testing, checkpointing, and serving commands run from the remote
 repository on the data disk. Dataset roots, model caches, output directories,
-and temporary files in the accepted configurations are relative to the
+and temporary files in the checked-in configurations are relative to the
 repository root.
 
-## Accepted baseline
+## Current runnable baseline
 
-The first runnable baseline uses:
+The current implementation uses:
 
-- action head width 512, eight attention heads, and FFN ratio four;
+- provisional action-head width 512, eight attention heads, and FFN ratio four;
 - frozen Qwen language-model and vision-encoder parameters;
 - trainable learned action queries, History Q-Former, Bridge/action stack, and
   direct action head;
 - AdamW parameter groups with explicit per-scope learning rate and weight
   decay;
 - global element-count-weighted masked L1 across accumulation steps and ranks.
+
+The action-head values `512 / 8 / 4` make this baseline runnable and shape-complete,
+but they are not an experimentally accepted final design. Capacity experiments
+must change the architecture configuration and preserve the resolved values in
+run/checkpoint metadata.
 
 The complete values live in `configs/model/qwen35_query_memory.yaml` and
 `configs/train/*.yaml`. Changing the tuning scope or optimizer values is an

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from experiments.calvin.eval import parse_action_response, to_calvin_action
@@ -45,3 +46,14 @@ def test_to_calvin_action_clamps_normalized_relative_motion():
 def test_to_calvin_action_rejects_nonfinite_values():
     with pytest.raises(ValueError, match="finite"):
         to_calvin_action([0, 0, float("inf"), 0, 0, 0, 0.5])
+
+
+def test_to_calvin_action_does_not_mutate_or_require_writable_input():
+    action = np.array([0, 2, -2, 0, 0, 0, 0.6], dtype=np.float32)
+    expected = action.copy()
+
+    assert to_calvin_action(action) == [0, 1, -1, 0, 0, 0, 1.0]
+    np.testing.assert_array_equal(action, expected)
+
+    action.setflags(write=False)
+    assert to_calvin_action(action) == [0, 1, -1, 0, 0, 0, 1.0]
