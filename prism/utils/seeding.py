@@ -5,13 +5,13 @@ import json
 import os
 import platform
 import random
-import subprocess
 import sys
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Mapping
 
+from prism.utils.git_metadata import collect_optional_git_identity
 from prism.utils.paths import display_project_path, sanitize_project_paths
 
 
@@ -153,34 +153,7 @@ def _repo_root(config: Mapping[str, Any]) -> Path | None:
 
 
 def _git_metadata(repo_root: Path | None = None) -> dict[str, Any]:
-    return {
-        "commit": _run_git(["rev-parse", "HEAD"], cwd=repo_root),
-        "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root),
-        "dirty": _git_dirty(repo_root),
-    }
-
-
-def _git_dirty(repo_root: Path | None = None) -> bool | None:
-    status = _run_git(["status", "--porcelain"], cwd=repo_root)
-    if status is None:
-        return None
-    return bool(status.strip())
-
-
-def _run_git(args: list[str], *, cwd: Path | None = None) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
+    return collect_optional_git_identity(repo_root)
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -242,4 +215,3 @@ def _torch_environment() -> dict[str, Any]:
     else:
         payload["devices"] = []
     return payload
-

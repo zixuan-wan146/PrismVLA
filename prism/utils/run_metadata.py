@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 import os
 import platform
 from pathlib import Path
-import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
+from prism.utils.git_metadata import collect_optional_git_identity
 from prism.utils.paths import display_project_path, sanitize_project_paths
 
 
@@ -25,6 +25,7 @@ def build_run_metadata(
 
     argv_items = [str(item) for item in argv]
     sanitized_argv = sanitize_project_paths(argv_items, repo_path)
+    git_identity = collect_optional_git_identity(repo_path)
     return {
         "created_at_utc": created_at_utc,
         "cwd": display_project_path(Path.cwd(), repo_path),
@@ -38,36 +39,12 @@ def build_run_metadata(
         "hostname": platform.node(),
         "git": {
             "repo_root": ".",
-            "commit": _git_output(repo_path, "rev-parse", "HEAD"),
-            "branch": _git_output(repo_path, "rev-parse", "--abbrev-ref", "HEAD"),
-            "is_dirty": _git_is_dirty(repo_path),
+            "commit": git_identity["commit"],
+            "branch": git_identity["branch"],
+            "is_dirty": git_identity["dirty"],
         },
         "environment": _safe_environment(environ, repo_path),
     }
-
-
-def _git_output(repo_root: Path, *args: str) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=repo_root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except (OSError, ValueError):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
-
-
-def _git_is_dirty(repo_root: Path) -> bool | None:
-    status = _git_output(repo_root, "status", "--porcelain")
-    if status is None:
-        return None
-    return bool(status)
-
 
 def _safe_environment(environ: Mapping[str, str], repo_root: Path) -> dict[str, str]:
     allowed_exact = {

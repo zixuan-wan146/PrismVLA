@@ -41,11 +41,13 @@ class _FakeAccelerator:
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         *,
         fail_on_save: bool = False,
+        fail_on_load: bool = False,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.fail_on_save = fail_on_save
+        self.fail_on_load = fail_on_load
         self.save_calls: list[Path] = []
         self.load_calls: list[Path] = []
         self.wait_calls = 0
@@ -68,6 +70,8 @@ class _FakeAccelerator:
             raise RuntimeError("injected save failure")
 
     def load_state(self, input_dir: str) -> None:
+        if self.fail_on_load:
+            raise RuntimeError("injected load failure")
         directory = Path(input_dir)
         self.load_calls.append(directory)
         state = torch.load(
@@ -393,6 +397,27 @@ def test_load_rejects_config_mismatch_and_corruption_before_accelerator_state(
     with (destination / "accelerator_state.pt").open("ab") as handle:
         handle.write(b"corrupt")
     with pytest.raises(ValueError, match="file size mismatch"):
+        load_checkpoint(
+            destination,
+            accelerator=accelerator,
+            expected_config=snapshot,
+        )
+    assert accelerator.load_calls == []
+
+
+def test_single_process_load_failure_preserves_original_exception(tmp_path: Path):
+    model, optimizer, scheduler = _objects()
+    accelerator = _FakeAccelerator(model, optimizer, scheduler)
+    snapshot = _snapshot()
+    destination = save_checkpoint(
+        tmp_path / "step-00000001",
+        accelerator=accelerator,
+        config=snapshot,
+        progress=_progress(1),
+    )
+    accelerator.fail_on_load = True
+
+    with pytest.raises(RuntimeError, match="injected load failure"):
         load_checkpoint(
             destination,
             accelerator=accelerator,

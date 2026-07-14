@@ -193,38 +193,94 @@ def load_checkpoint(
 
     context = _accelerator_context(accelerator)
     checkpoint = _checkpoint_path(path)
-    metadata = read_checkpoint_metadata(checkpoint)
-    expected_snapshot, expected_hashes = resolve_snapshot(expected_config)
+    metadata: CheckpointMetadata | None = None
 
-    if metadata.world_size != context["world_size"]:
-        raise ValueError(
-            f"checkpoint world size mismatch: stored {metadata.world_size}, current {context['world_size']}"
-        )
-    comparisons = (
-        ("architecture", metadata.architecture_sha256, expected_hashes.architecture),
-        ("DataSpec schema", metadata.data_spec_sha256, expected_hashes.data_spec),
-        ("normalization statistics", metadata.statistics_sha256, expected_hashes.statistics),
-        (
-            "resolved train config",
-            metadata.resolved_train_snapshot_sha256,
-            expected_hashes.config,
-        ),
+    def read_metadata() -> None:
+        nonlocal metadata
+        metadata = read_checkpoint_metadata(checkpoint)
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="read and validate checkpoint metadata",
+        operation=read_metadata,
+        preserve_single_process_exception=True,
     )
-    for label, stored, expected in comparisons:
-        if stored != expected:
-            raise ValueError(f"checkpoint {label} hash mismatch: stored {stored}, expected {expected}")
-    if canonical_json_bytes(metadata.resolved_train_snapshot) != canonical_json_bytes(expected_snapshot):
-        raise ValueError("checkpoint resolved train snapshot differs from expected config")
+    assert metadata is not None
 
-    validate_progress(metadata.progress, expected_snapshot, world_size=context["world_size"])
-    rng_relative = metadata.rng_rank_files[context["rank"]]
-    rng_payload = read_json(checkpoint / rng_relative, label=f"rank {context['rank']} RNG state")
-    validate_rng_payload(rng_payload, expected_rank=context["rank"])
+    expected_snapshot: dict[str, Any] | None = None
 
-    accelerator.wait_for_everyone()
-    accelerator.load_state(str(checkpoint))
-    accelerator.wait_for_everyone()
-    restore_rng_state(rng_payload)
+    def validate_expected_configuration() -> None:
+        nonlocal expected_snapshot
+        expected_snapshot, expected_hashes = resolve_snapshot(expected_config)
+        if metadata.world_size != context["world_size"]:
+            raise ValueError(
+                f"checkpoint world size mismatch: stored {metadata.world_size}, "
+                f"current {context['world_size']}"
+            )
+        comparisons = (
+            ("architecture", metadata.architecture_sha256, expected_hashes.architecture),
+            ("DataSpec schema", metadata.data_spec_sha256, expected_hashes.data_spec),
+            ("normalization statistics", metadata.statistics_sha256, expected_hashes.statistics),
+            (
+                "resolved train config",
+                metadata.resolved_train_snapshot_sha256,
+                expected_hashes.config,
+            ),
+        )
+        for label, stored, expected in comparisons:
+            if stored != expected:
+                raise ValueError(
+                    f"checkpoint {label} hash mismatch: stored {stored}, expected {expected}"
+                )
+        if canonical_json_bytes(metadata.resolved_train_snapshot) != canonical_json_bytes(
+            expected_snapshot
+        ):
+            raise ValueError("checkpoint resolved train snapshot differs from expected config")
+        validate_progress(
+            metadata.progress,
+            expected_snapshot,
+            world_size=context["world_size"],
+        )
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="validate checkpoint against expected configuration",
+        operation=validate_expected_configuration,
+        preserve_single_process_exception=True,
+    )
+    assert expected_snapshot is not None
+
+    rng_payload: dict[str, Any] | None = None
+
+    def read_rank_rng() -> None:
+        nonlocal rng_payload
+        rng_relative = metadata.rng_rank_files[context["rank"]]
+        rng_payload = read_json(
+            checkpoint / rng_relative,
+            label=f"rank {context['rank']} RNG state",
+        )
+        validate_rng_payload(rng_payload, expected_rank=context["rank"])
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="read and validate rank RNG state",
+        operation=read_rank_rng,
+        preserve_single_process_exception=True,
+    )
+    assert rng_payload is not None
+
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="load Accelerate state",
+        operation=lambda: accelerator.load_state(str(checkpoint)),
+        preserve_single_process_exception=True,
+    )
+    _run_collective_checkpoint_phase(
+        context=context,
+        phase="restore rank RNG state",
+        operation=lambda: restore_rng_state(rng_payload),
+        preserve_single_process_exception=True,
+    )
     return metadata.progress
 
 
@@ -263,16 +319,19 @@ def _run_collective_checkpoint_phase(
     phase: str,
     operation: Callable[[], None],
     main_process_only: bool = False,
+    preserve_single_process_exception: bool = False,
 ) -> None:
     """Run one phase and all-gather a serializable error before any later phase."""
 
     rank = int(context["rank"])
     world_size = int(context["world_size"])
     local_error: dict[str, Any] | None = None
+    local_exception: Exception | None = None
     if not main_process_only or bool(context["is_main_process"]):
         try:
             operation()
         except Exception as exc:
+            local_exception = exc
             local_error = {
                 "rank": rank,
                 "exception": type(exc).__name__,
@@ -290,6 +349,9 @@ def _run_collective_checkpoint_phase(
 
     failures = [error for error in errors if error is not None]
     if failures:
+        if world_size == 1 and preserve_single_process_exception:
+            assert local_exception is not None
+            raise local_exception
         failure = min(failures, key=lambda value: int(value["rank"]))
         raise CheckpointError(
             f"checkpoint phase {phase!r} failed on rank {failure['rank']}: "

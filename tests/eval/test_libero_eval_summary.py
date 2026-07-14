@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 import experiments.libero.eval as libero_eval
 
@@ -110,6 +111,26 @@ def test_build_run_metadata_keeps_safe_environment_and_redacts_secret_like_keys(
     }
 
 
+def test_build_run_metadata_records_clean_repository_as_not_dirty(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Prism Test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "prism@example.invalid"],
+        check=True,
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "clean"], check=True)
+
+    metadata = build_run_metadata(repo_root=tmp_path, environ={}, argv=[])
+
+    assert metadata["git"]["is_dirty"] is False
+
+
 def test_default_run_metadata_resolves_repository_root(monkeypatch):
     from pathlib import Path
 
@@ -117,11 +138,11 @@ def test_default_run_metadata_resolves_repository_root(monkeypatch):
 
     observed_roots = []
 
-    def fake_git_output(repo_root, *args):
+    def fake_git_identity(repo_root):
         observed_roots.append(repo_root)
-        return None
+        return {"commit": None, "branch": None, "dirty": None}
 
-    monkeypatch.setattr(run_metadata, "_git_output", fake_git_output)
+    monkeypatch.setattr(run_metadata, "collect_optional_git_identity", fake_git_identity)
     run_metadata.build_run_metadata(
         environ={},
         argv=[],
@@ -129,8 +150,7 @@ def test_default_run_metadata_resolves_repository_root(monkeypatch):
     )
 
     expected_root = Path(run_metadata.__file__).resolve().parents[2]
-    assert observed_roots
-    assert all(root == expected_root for root in observed_roots)
+    assert observed_roots == [expected_root]
 
 
 def test_libero_evaluation_reuses_one_start_metadata_record(monkeypatch, tmp_path):
