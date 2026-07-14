@@ -1,57 +1,152 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
-from prism.serve.history import SparseHistoryBuffer
+from prism.serve.history import ConnectionHistoryState, HistoryCaptureTarget, HistoryPrecomputeSchedule
 
 
-VIEW_NAMES = ("static", "wrist")
+def test_history_schedule_emits_generation_targets_only_at_o2_and_o5():
+    schedule = HistoryPrecomputeSchedule()
+
+    targets = [schedule.target_for_step(step) for step in range(1, 9)]
+
+    assert targets == [
+        None,
+        HistoryCaptureTarget(target_generation=1, slot=0),
+        None,
+        None,
+        HistoryCaptureTarget(target_generation=1, slot=1),
+        None,
+        None,
+        None,
+    ]
+    assert schedule.scheduled_slots == (0, 1)
+    assert schedule.advance_generation() == 1
+    assert schedule.target_for_step(2) == HistoryCaptureTarget(target_generation=2, slot=0)
 
 
-def images(value: int) -> dict[str, np.ndarray]:
-    return {
-        "static": np.full((3, 4, 3), value, dtype=np.uint8),
-        "wrist": np.full((2, 2, 3), value + 1, dtype=np.uint8),
-    }
+def test_history_schedule_rejects_duplicates_and_incomplete_generation():
+    schedule = HistoryPrecomputeSchedule()
+    schedule.target_for_step(2)
+
+    with pytest.raises(ValueError, match="scheduled more than once"):
+        schedule.target_for_step(2)
+    with pytest.raises(RuntimeError, match="both capture slots"):
+        schedule.advance_generation()
 
 
-def test_sparse_history_buffer_captures_only_offsets_two_and_five():
-    buffer = SparseHistoryBuffer(VIEW_NAMES)
-    for step in range(1, 8):
-        captured = buffer.capture(step, images(step))
-        assert captured is (step in {2, 5})
+def test_connection_history_state_builds_memory_and_releases_visual_slots():
+    state: ConnectionHistoryState[str, str] = ConnectionHistoryState()
+    state.reset("episode:1")
 
-    assert buffer.captured_offsets == (2, 5)
-    payload = buffer.consume(images(8))
+    assert state.memory_for_inference(
+        stream_id="episode:1",
+        generation=0,
+        empty_memory=lambda: "empty-memory",
+    ) == "empty-memory"
+    state.mark_inference_complete(stream_id="episode:1", generation=0)
 
-    assert payload.step_ages.tolist() == [6, 3]
-    assert payload.valid_mask.tolist() == [True, True]
-    np.testing.assert_array_equal(payload.images_by_view["static"][:, 0, 0, 0], [2, 5])
-    np.testing.assert_array_equal(payload.images_by_view["wrist"][:, 0, 0, 0], [3, 6])
-    assert buffer.captured_offsets == ()
+    built_from = []
+
+    def build_memory(observations):
+        built_from.append(observations)
+        return "ready-memory"
+
+    assert not state.add_observation(
+        stream_id="episode:1",
+        target_generation=1,
+        slot=0,
+        observation="visual-o2",
+        build_memory=build_memory,
+    )
+    assert state.cached_visual_slots == (0,)
+    assert state.add_observation(
+        stream_id="episode:1",
+        target_generation=1,
+        slot=1,
+        observation="visual-o5",
+        build_memory=build_memory,
+    )
+
+    assert built_from == [("visual-o2", "visual-o5")]
+    assert state.cached_visual_slots == ()
+    assert state.ready_generation == 1
+    assert state.memory_for_inference(
+        stream_id="episode:1",
+        generation=1,
+        empty_memory=lambda: "unused",
+    ) == "ready-memory"
+    state.mark_inference_complete(stream_id="episode:1", generation=1)
+    assert state.ready_generation is None
+    assert state.last_inferred_generation == 1
 
 
-def test_initial_history_uses_zero_slots_and_invalid_mask():
-    payload = SparseHistoryBuffer(VIEW_NAMES).consume(images(0))
+def test_connection_history_state_requires_reset_and_complete_memory():
+    state: ConnectionHistoryState[str, str] = ConnectionHistoryState()
+    with pytest.raises(RuntimeError, match="reset_history"):
+        state.memory_for_inference(stream_id="missing", generation=0, empty_memory=lambda: "empty")
 
-    assert payload.valid_mask.tolist() == [False, False]
-    assert not payload.images_by_view["static"].any()
-    assert not payload.images_by_view["wrist"].any()
+    state.reset("episode:2")
+    state.memory_for_inference(stream_id="episode:2", generation=0, empty_memory=lambda: "empty")
+    state.mark_inference_complete(stream_id="episode:2", generation=0)
+    state.add_observation(
+        stream_id="episode:2",
+        target_generation=1,
+        slot=0,
+        observation="only-slot",
+        build_memory=lambda observations: "unused",
+    )
+    with pytest.raises(RuntimeError, match=r"missing history slots \[1\]"):
+        state.memory_for_inference(stream_id="episode:2", generation=1, empty_memory=lambda: "empty")
+    with pytest.raises(ValueError, match="Active stream"):
+        state.memory_for_inference(stream_id="other", generation=1, empty_memory=lambda: "empty")
 
 
-def test_history_buffer_copies_captured_images():
-    source = images(2)
-    buffer = SparseHistoryBuffer(VIEW_NAMES)
-    buffer.capture(2, source)
-    source["static"].fill(99)
-    payload = buffer.consume(images(8))
+def test_connection_history_reset_drops_partial_and_ready_tokens():
+    state: ConnectionHistoryState[object, object] = ConnectionHistoryState()
+    state.reset("old")
+    state.memory_for_inference(stream_id="old", generation=0, empty_memory=object)
+    state.mark_inference_complete(stream_id="old", generation=0)
+    state.add_observation(
+        stream_id="old",
+        target_generation=1,
+        slot=0,
+        observation=object(),
+        build_memory=lambda observations: object(),
+    )
+    assert state.cached_visual_slots == (0,)
 
-    assert payload.images_by_view["static"][0, 0, 0, 0] == 2
+    state.reset("new")
+
+    assert state.stream_id == "new"
+    assert state.cached_visual_slots == ()
+    assert state.ready_generation is None
+    assert state.last_inferred_generation == -1
 
 
-def test_history_buffer_rejects_duplicate_capture():
-    buffer = SparseHistoryBuffer(VIEW_NAMES)
-    buffer.capture(2, images(2))
-    with pytest.raises(ValueError, match="more than once"):
-        buffer.capture(2, images(2))
+def test_connection_history_build_failure_drops_both_visual_slots():
+    state: ConnectionHistoryState[str, str] = ConnectionHistoryState()
+    state.reset("episode:3")
+    state.memory_for_inference(stream_id="episode:3", generation=0, empty_memory=lambda: "empty")
+    state.mark_inference_complete(stream_id="episode:3", generation=0)
+    state.add_observation(
+        stream_id="episode:3",
+        target_generation=1,
+        slot=0,
+        observation="o2",
+        build_memory=lambda observations: "unused",
+    )
+
+    def fail_build(observations):
+        raise RuntimeError(f"failed for {observations}")
+
+    with pytest.raises(RuntimeError, match="failed for"):
+        state.add_observation(
+            stream_id="episode:3",
+            target_generation=1,
+            slot=1,
+            observation="o5",
+            build_memory=fail_build,
+        )
+    assert state.cached_visual_slots == ()
+    assert state.ready_generation is None

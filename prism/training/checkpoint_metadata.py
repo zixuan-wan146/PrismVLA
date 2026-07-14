@@ -259,6 +259,7 @@ def _validate_snapshot(snapshot: Mapping[str, Any]) -> _SnapshotHashes:
             f"snapshot DataSpec hash mismatch: stored {data['data_spec_sha256']}, computed {data_spec_hash}"
         )
     robot_key = resolved_data_spec.robot_key
+    anchor_stride = _positive_int(data["anchor_stride"], "snapshot anchor_stride")
 
     normalization = _strict_mapping(data["normalization"], "snapshot normalization")
     _expect_keys(
@@ -352,6 +353,19 @@ def _validate_snapshot(snapshot: Mapping[str, Any]) -> _SnapshotHashes:
     _expect_keys(derived, {"temporal_contract", "source"}, "snapshot derived")
     if derived["source"] != "model.architecture.temporal":
         raise ValueError("snapshot derived temporal contract has an unsupported source")
+    temporal_contract = _strict_mapping(
+        derived["temporal_contract"],
+        "snapshot temporal contract",
+    )
+    replan_stride = _positive_int(
+        temporal_contract.get("replan_stride"),
+        "snapshot temporal replan_stride",
+    )
+    if anchor_stride != replan_stride:
+        raise ValueError(
+            "snapshot anchor_stride must equal temporal replan_stride: "
+            f"{anchor_stride} != {replan_stride}"
+        )
 
     return _SnapshotHashes(
         config=canonical_sha256(snapshot),

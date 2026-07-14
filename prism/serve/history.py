@@ -1,105 +1,210 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
-import numpy as np
+
+VisualObservationT = TypeVar("VisualObservationT")
+MemoryT = TypeVar("MemoryT")
 
 
 @dataclass(frozen=True)
-class SparseHistoryPayload:
-    images_by_view: Mapping[str, np.ndarray]
-    step_ages: np.ndarray
-    valid_mask: np.ndarray
+class HistoryCaptureTarget:
+    """Server-side memory destination for one within-chunk observation."""
+
+    target_generation: int
+    slot: int
 
 
-class SparseHistoryBuffer:
-    """Capture only the two within-chunk observations required by the policy."""
+class HistoryPrecomputeSchedule:
+    """Track generations and the fixed O2/O5 capture schedule without storing images."""
 
     def __init__(
         self,
-        view_names: Sequence[str],
         *,
         capture_offsets: Sequence[int] = (2, 5),
         replan_stride: int = 8,
     ) -> None:
-        self.view_names = tuple(str(name) for name in view_names)
-        self.capture_offsets = tuple(int(offset) for offset in capture_offsets)
-        self.replan_stride = int(replan_stride)
-        if not self.view_names or len(set(self.view_names)) != len(self.view_names):
-            raise ValueError("view_names must be non-empty and unique")
-        if self.capture_offsets != (2, 5) or self.replan_stride != 8:
+        self.capture_offsets = tuple(capture_offsets)
+        self.replan_stride = replan_stride
+        if (
+            any(isinstance(offset, bool) or not isinstance(offset, int) for offset in self.capture_offsets)
+            or isinstance(self.replan_stride, bool)
+            or not isinstance(self.replan_stride, int)
+            or self.capture_offsets != (2, 5)
+            or self.replan_stride != 8
+        ):
             raise ValueError("The accepted history schedule is capture_offsets=(2, 5), replan_stride=8")
-        self._frames: dict[int, dict[str, np.ndarray]] = {}
+        self.reset()
 
     @property
-    def step_ages(self) -> tuple[int, ...]:
-        return tuple(self.replan_stride - offset for offset in self.capture_offsets)
+    def current_generation(self) -> int:
+        return self._current_generation
 
     @property
-    def captured_offsets(self) -> tuple[int, ...]:
-        return tuple(offset for offset in self.capture_offsets if offset in self._frames)
+    def scheduled_slots(self) -> tuple[int, ...]:
+        return tuple(sorted(self._scheduled_slots))
 
     def reset(self) -> None:
-        self._frames.clear()
+        self._current_generation = 0
+        self._scheduled_slots: set[int] = set()
 
-    def capture(self, local_step: int, images_by_view: Mapping[str, np.ndarray]) -> bool:
-        local_step = int(local_step)
-        if local_step not in self.capture_offsets:
+    def target_for_step(self, local_step: int) -> HistoryCaptureTarget | None:
+        if isinstance(local_step, bool) or not isinstance(local_step, int):
+            raise ValueError(f"local_step must be an integer, got {local_step!r}")
+        if local_step <= 0 or local_step > self.replan_stride:
+            raise ValueError(f"local_step must be in [1, {self.replan_stride}], got {local_step}")
+        try:
+            slot = self.capture_offsets.index(local_step)
+        except ValueError:
+            return None
+        if slot in self._scheduled_slots:
+            raise ValueError(f"History slot {slot} at offset {local_step} was scheduled more than once")
+        self._scheduled_slots.add(slot)
+        return HistoryCaptureTarget(target_generation=self._current_generation + 1, slot=slot)
+
+    def advance_generation(self) -> int:
+        expected_slots = set(range(len(self.capture_offsets)))
+        if self._scheduled_slots != expected_slots:
+            raise RuntimeError(
+                "Cannot advance history generation before both capture slots were scheduled: "
+                f"got {sorted(self._scheduled_slots)}"
+            )
+        self._current_generation += 1
+        self._scheduled_slots.clear()
+        return self._current_generation
+
+
+class ConnectionHistoryState(Generic[VisualObservationT, MemoryT]):
+    """Bounded token-only history state owned by one WebSocket connection."""
+
+    def __init__(self) -> None:
+        self._stream_id: str | None = None
+        self._last_inferred_generation = -1
+        self._building_generation: int | None = None
+        self._visual_slots: dict[int, VisualObservationT] = {}
+        self._ready_generation: int | None = None
+        self._ready_memory: MemoryT | None = None
+
+    @property
+    def stream_id(self) -> str | None:
+        return self._stream_id
+
+    @property
+    def last_inferred_generation(self) -> int:
+        return self._last_inferred_generation
+
+    @property
+    def cached_visual_slots(self) -> tuple[int, ...]:
+        return tuple(sorted(self._visual_slots))
+
+    @property
+    def ready_generation(self) -> int | None:
+        return self._ready_generation
+
+    def reset(self, stream_id: str) -> None:
+        if not isinstance(stream_id, str) or not stream_id.strip():
+            raise ValueError("stream_id must be a non-empty string")
+        self.clear()
+        self._stream_id = stream_id
+
+    def clear(self) -> None:
+        self._stream_id = None
+        self._last_inferred_generation = -1
+        self._building_generation = None
+        self._visual_slots.clear()
+        self._ready_generation = None
+        self._ready_memory = None
+
+    def add_observation(
+        self,
+        *,
+        stream_id: str,
+        target_generation: int,
+        slot: int,
+        observation: VisualObservationT,
+        build_memory: Callable[[tuple[VisualObservationT, VisualObservationT]], MemoryT],
+    ) -> bool:
+        self._require_stream(stream_id)
+        self._require_exact_int(target_generation, "target_generation")
+        self._require_exact_int(slot, "slot")
+        if slot not in (0, 1):
+            raise ValueError(f"slot must be 0 or 1, got {slot}")
+        expected_generation = self._last_inferred_generation + 1
+        if target_generation <= 0 or target_generation != expected_generation:
+            raise ValueError(
+                f"Expected history for generation {expected_generation}, got {target_generation}"
+            )
+        if self._ready_generation is not None:
+            raise RuntimeError(f"Memory for generation {self._ready_generation} is already ready")
+        if self._building_generation is None:
+            self._building_generation = target_generation
+        elif self._building_generation != target_generation:
+            raise ValueError(
+                f"Already building generation {self._building_generation}, got {target_generation}"
+            )
+        if slot in self._visual_slots:
+            raise ValueError(f"History slot {slot} for generation {target_generation} was pushed more than once")
+        self._visual_slots[slot] = observation
+        if len(self._visual_slots) < 2:
             return False
-        if local_step in self._frames:
-            raise ValueError(f"History offset {local_step} was captured more than once")
-        normalized = _normalize_current_images(images_by_view, self.view_names)
-        self._frames[local_step] = {name: image.copy() for name, image in normalized.items()}
+
+        ordered_observations = (self._visual_slots[0], self._visual_slots[1])
+        self._visual_slots.clear()
+        self._building_generation = None
+        try:
+            memory = build_memory(ordered_observations)
+        except Exception:
+            self._ready_generation = None
+            self._ready_memory = None
+            raise
+        self._ready_generation = target_generation
+        self._ready_memory = memory
         return True
 
-    def consume(self, current_images_by_view: Mapping[str, np.ndarray]) -> SparseHistoryPayload:
-        current = _normalize_current_images(current_images_by_view, self.view_names)
-        valid_mask = np.array([offset in self._frames for offset in self.capture_offsets], dtype=np.bool_)
-        history_by_view: dict[str, np.ndarray] = {}
-        for view_name in self.view_names:
-            slots: list[np.ndarray] = []
-            for offset in self.capture_offsets:
-                if offset in self._frames:
-                    image = self._frames[offset][view_name]
-                    if image.shape != current[view_name].shape:
-                        raise ValueError(
-                            f"Historical {view_name!r} shape {image.shape} does not match current {current[view_name].shape}"
-                        )
-                    slots.append(image)
-                else:
-                    slots.append(np.zeros_like(current[view_name], dtype=np.uint8))
-            history_by_view[view_name] = np.ascontiguousarray(np.stack(slots, axis=0), dtype=np.uint8)
-        payload = SparseHistoryPayload(
-            images_by_view=history_by_view,
-            step_ages=np.asarray(self.step_ages, dtype=np.int32),
-            valid_mask=valid_mask,
-        )
-        self.reset()
-        return payload
+    def memory_for_inference(
+        self,
+        *,
+        stream_id: str,
+        generation: int,
+        empty_memory: Callable[[], MemoryT],
+    ) -> MemoryT:
+        self._require_stream(stream_id)
+        self._require_exact_int(generation, "generation")
+        expected_generation = self._last_inferred_generation + 1
+        if generation != expected_generation:
+            raise ValueError(f"Expected inference generation {expected_generation}, got {generation}")
+        if generation == 0:
+            return empty_memory()
+        if self._ready_generation != generation or self._ready_memory is None:
+            if self._building_generation == generation:
+                missing = sorted({0, 1} - set(self._visual_slots))
+                raise RuntimeError(
+                    f"Memory for generation {generation} is not ready; missing history slots {missing}"
+                )
+            raise RuntimeError(f"Memory for generation {generation} is not ready")
+        return self._ready_memory
 
+    def mark_inference_complete(self, *, stream_id: str, generation: int) -> None:
+        self._require_stream(stream_id)
+        self._require_exact_int(generation, "generation")
+        expected_generation = self._last_inferred_generation + 1
+        if generation != expected_generation:
+            raise ValueError(f"Expected completed generation {expected_generation}, got {generation}")
+        if generation > 0 and (self._ready_generation != generation or self._ready_memory is None):
+            raise RuntimeError(f"Memory for generation {generation} was not ready")
+        self._last_inferred_generation = generation
+        self._ready_generation = None
+        self._ready_memory = None
 
-def empty_history_payload(
-    current_images_by_view: Mapping[str, np.ndarray],
-    *,
-    view_names: Sequence[str] | None = None,
-) -> SparseHistoryPayload:
-    ordered_names = tuple(current_images_by_view) if view_names is None else tuple(view_names)
-    return SparseHistoryBuffer(ordered_names).consume(current_images_by_view)
+    def _require_stream(self, stream_id: str) -> None:
+        if self._stream_id is None:
+            raise RuntimeError("History stream is not initialized; send reset_history first")
+        if stream_id != self._stream_id:
+            raise ValueError(f"Active stream is {self._stream_id!r}, got {stream_id!r}")
 
-
-def _normalize_current_images(
-    images_by_view: Mapping[str, np.ndarray],
-    view_names: tuple[str, ...],
-) -> dict[str, np.ndarray]:
-    if tuple(images_by_view) != view_names:
-        raise ValueError(f"Expected ordered views {view_names}, got {tuple(images_by_view)}")
-    normalized: dict[str, np.ndarray] = {}
-    for view_name in view_names:
-        image = np.asarray(images_by_view[view_name])
-        if image.ndim != 3 or image.shape[-1] != 3:
-            raise ValueError(f"{view_name!r} must be an HxWx3 image")
-        if image.dtype != np.uint8:
-            raise ValueError(f"{view_name!r} must have dtype uint8")
-        normalized[view_name] = np.ascontiguousarray(image)
-    return normalized
+    @staticmethod
+    def _require_exact_int(value: int, field_name: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field_name} must be an integer, got {value!r}")

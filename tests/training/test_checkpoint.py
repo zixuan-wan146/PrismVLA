@@ -162,7 +162,7 @@ def _snapshot(
             "data_spec_sha256": schema_hash,
             "data_spec": data_spec,
             "root": "data/calvin",
-            "anchor_stride": 1,
+            "anchor_stride": 8,
             "include_tail": True,
             "datasets": [
                 {
@@ -220,6 +220,11 @@ def _snapshot(
                 "trainable": True,
                 "learning_rate": 1.0e-4,
                 "weight_decay": 0.01,
+            },
+            "task_state_planner": {
+                "trainable": False,
+                "learning_rate": None,
+                "weight_decay": None,
             },
         },
         "trainer": {

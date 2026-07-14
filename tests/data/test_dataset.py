@@ -119,6 +119,13 @@ def test_temporal_sample_zero_fills_invalid_history_and_action_tail() -> None:
     assert sample.action_valid_mask.tolist() == [True, True, True, False]
     assert sample.target_actions[:, 6].tolist() == [0.0, 1.0, 0.0, 0.0]
     assert not sample.target_actions[-1].any()
+    assert sample.policy_input.executed_actions.shape == (4, 7)
+    assert sample.policy_input.executed_action_valid_mask.tolist() == [False, False, False, True]
+    assert not sample.policy_input.executed_actions[:3].any()
+    np.testing.assert_array_equal(
+        sample.policy_input.executed_actions[-1],
+        FakeNormalizer().normalize_action(FakeBackend._action(0)),
+    )
 
 
 def test_anchor_stride_and_tail_policy_are_explicit() -> None:

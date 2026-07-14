@@ -2,8 +2,8 @@ backbone:
   model_name: Qwen/Qwen3.5-0.8B
   num_hidden_layers: 16
   hidden_size: 1024
-  num_action_queries: 48
-  image_size: 384
+  num_action_queries: 32
+  image_size: 256
   torch_dtype: bfloat16
   local_files_only: false
 
@@ -13,7 +13,7 @@ history:
   num_layers: 2
   num_heads: 4
   mlp_ratio: 4
-  num_memory_tokens: 24
+  num_memory_tokens: 16
   num_history_frames: 2
   max_relative_age: 8
   dropout: 0.0
@@ -36,3 +36,23 @@ action_head:
 bridge:
   num_layers: 16
   memory_gate_init: 0.1
+
+task_state_planner:
+  query_layer: 12
+  query_input_dim: 1024
+  num_query_tokens: 32
+  hidden_size: 512
+  num_state_tokens: 8
+  num_plan_tokens: 16
+  action_dim: 7
+  action_horizon: 8
+  action_mlp_hidden_size: 256
+  mlp_hidden_size: 1024
+  num_attention_heads: 8
+  attention_dropout: 0.0
+  mlp_dropout: 0.0
+  plan_horizon_actions: 64
+  mamba_num_layers: 1
+  mamba_d_state: 16
+  mamba_d_conv: 4
+  mamba_expand: 2

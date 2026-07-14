@@ -29,6 +29,22 @@ class QueryMemoryEncoderOutput:
 
 
 @dataclass(frozen=True)
+class EncodedHistoryObservation:
+    """Two-camera visual tokens retained between policy decisions."""
+
+    tokens: torch.Tensor
+    valid_mask: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.tokens.ndim != 2 or not torch.is_floating_point(self.tokens):
+            raise ValueError("history observation tokens must be floating with shape [tokens, hidden]")
+        if self.valid_mask.dtype != torch.bool or self.valid_mask.shape != self.tokens.shape[:1]:
+            raise ValueError("history observation valid_mask must be boolean with shape [tokens]")
+        if self.tokens.shape[0] <= 0 or self.tokens.shape[1] <= 0:
+            raise ValueError("history observation tokens must be non-empty")
+
+
+@dataclass(frozen=True)
 class PreparedQueryMemoryBatch:
     current_inputs: Mapping[str, torch.Tensor]
     history_inputs: Mapping[str, torch.Tensor]
@@ -146,7 +162,22 @@ class Qwen35ActionQueryBackbone(nn.Module):
                 if len(historical_observation) != 2:
                     raise ValueError("Each historical observation must contain exactly two ordered camera images")
                 flat_images.extend(np.asarray(image, dtype=np.uint8) for image in historical_observation)
-        batch = self.processor.image_processor(images=flat_images, return_tensors="pt")
+        return self._prepare_image_batch(flat_images)
+
+    def prepare_history_observation(
+        self,
+        images: Sequence[np.ndarray],
+    ) -> Mapping[str, torch.Tensor]:
+        """Prepare one transient two-camera observation for background encoding."""
+
+        if len(images) != 2:
+            raise ValueError("A historical observation must contain exactly two ordered camera images")
+        return self._prepare_image_batch([np.asarray(image, dtype=np.uint8) for image in images])
+
+    def _prepare_image_batch(self, images: Sequence[np.ndarray]) -> Mapping[str, torch.Tensor]:
+        if not images:
+            raise ValueError("images must contain at least one image")
+        batch = self.processor.image_processor(images=list(images), return_tensors="pt")
         return {key: value for key, value in batch.items() if isinstance(value, torch.Tensor)}
 
     def forward(self, **prepared_inputs: torch.Tensor) -> QueryBackboneOutput:
@@ -265,7 +296,9 @@ class Qwen35QueryMemoryEncoder(nn.Module):
         self.backbone = backbone
         self.history_qformer = HistoryQFormer() if history_qformer is None else history_qformer
 
-    def prepare_requests(self, requests: Sequence[PolicyInput]) -> PreparedQueryMemoryBatch:
+    def prepare_current_requests(self, requests: Sequence[Any]) -> Mapping[str, torch.Tensor]:
+        """Prepare only current images and prompts for runtime inference."""
+
         if not requests:
             raise ValueError("requests must contain at least one policy request")
         benchmark = requests[0].benchmark
@@ -274,20 +307,31 @@ class Qwen35QueryMemoryEncoder(nn.Module):
             raise ValueError(f"The query-memory encoder requires exactly two ordered views, got {view_names}")
 
         current_images: list[tuple[np.ndarray, np.ndarray]] = []
-        history_images: list[tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]] = []
-        history_step_ages: list[np.ndarray] = []
-        history_valid_mask: list[np.ndarray] = []
         instructions: list[str] = []
         for request in requests:
             if request.benchmark != benchmark:
                 raise ValueError("A query-memory batch cannot mix benchmark contracts")
+            if tuple(request.images_by_view) != view_names:
+                raise ValueError(f"Every request must preserve the ordered views {view_names}")
+            current_images.append(tuple(np.asarray(request.images_by_view[name]) for name in view_names))
+            instructions.append(request.prompt)
+        return self.backbone.prepare_current_batch(current_images, instructions)
+
+    def prepare_requests(self, requests: Sequence[PolicyInput]) -> PreparedQueryMemoryBatch:
+        if not requests:
+            raise ValueError("requests must contain at least one policy request")
+        view_names = tuple(requests[0].images_by_view)
+
+        history_images: list[tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]] = []
+        history_step_ages: list[np.ndarray] = []
+        history_valid_mask: list[np.ndarray] = []
+        for request in requests:
             if tuple(request.images_by_view) != view_names or tuple(request.history_images_by_view) != view_names:
                 raise ValueError(f"Every request must preserve the ordered views {view_names}")
             per_view_history = [np.asarray(request.history_images_by_view[name]) for name in view_names]
             if any(images.shape[0] != 2 for images in per_view_history):
                 raise ValueError("Every request must contain exactly two historical observations per view")
 
-            current_images.append(tuple(np.asarray(request.images_by_view[name]) for name in view_names))
             history_images.append(
                 tuple(
                     tuple(per_view_history[view_index][history_index] for view_index in range(2))
@@ -296,13 +340,84 @@ class Qwen35QueryMemoryEncoder(nn.Module):
             )
             history_step_ages.append(np.asarray(request.history_step_ages, dtype=np.int64))
             history_valid_mask.append(np.asarray(request.history_valid_mask, dtype=np.bool_))
-            instructions.append(request.prompt)
 
         return PreparedQueryMemoryBatch(
-            current_inputs=self.backbone.prepare_current_batch(current_images, instructions),
+            current_inputs=self.prepare_current_requests(requests),
             history_inputs=self.backbone.prepare_history_images(history_images),
             history_step_ages=torch.from_numpy(np.stack(history_step_ages)),
             history_valid_mask=torch.from_numpy(np.stack(history_valid_mask)),
+        )
+
+    def encode_history_observation(
+        self,
+        images: Sequence[np.ndarray],
+    ) -> EncodedHistoryObservation:
+        """Encode one transient two-camera observation and retain only visual tokens."""
+
+        prepared = self.backbone.prepare_history_observation(images)
+        image_features = self.backbone.encode_images(
+            prepared["pixel_values"],
+            prepared["image_grid_thw"],
+        )
+        if len(image_features) != 2:
+            raise ValueError(f"Expected two encoded camera views, got {len(image_features)}")
+        first_view, second_view = image_features
+        if first_view.ndim != 2 or second_view.ndim != 2 or first_view.shape[-1] != second_view.shape[-1]:
+            raise ValueError("Encoded camera views must have shape [tokens, hidden] with a shared hidden size")
+        tokens = torch.cat((first_view, second_view), dim=0).detach()
+        return EncodedHistoryObservation(
+            tokens=tokens,
+            valid_mask=torch.ones(tokens.shape[0], dtype=torch.bool, device=tokens.device),
+        )
+
+    def build_history_memory(
+        self,
+        observations: Sequence[EncodedHistoryObservation],
+        history_step_ages: Sequence[int],
+    ) -> HistoryMemoryOutput:
+        """Compress two already encoded observations and releaseable visual-token inputs."""
+
+        if len(observations) != self.history_qformer.config.num_history_frames:
+            raise ValueError(
+                f"Expected {self.history_qformer.config.num_history_frames} encoded history observations, "
+                f"got {len(observations)}"
+            )
+        ages = tuple(int(age) for age in history_step_ages)
+        if len(ages) != self.history_qformer.config.num_history_frames:
+            raise ValueError("history_step_ages must match the configured history frame count")
+        history_tokens, history_token_mask = pack_encoded_history_observations(observations)
+        return self.history_qformer(
+            history_tokens,
+            torch.tensor([ages], dtype=torch.long, device=history_tokens.device),
+            torch.ones(1, len(observations), dtype=torch.bool, device=history_tokens.device),
+            history_token_mask,
+        )
+
+    def empty_history_memory(self, batch_size: int = 1) -> HistoryMemoryOutput:
+        return self.history_qformer.empty_memory(batch_size)
+
+    def forward_current_with_memory(
+        self,
+        current_inputs: Mapping[str, torch.Tensor],
+        memory: HistoryMemoryOutput,
+    ) -> QueryMemoryEncoderOutput:
+        """Encode the current request while consuming precomputed fixed-size memory."""
+
+        current_output = self.backbone(**current_inputs)
+        batch_size = current_output.query_valid_mask.shape[0]
+        expected_tokens = (
+            batch_size,
+            self.history_qformer.config.num_memory_tokens,
+            self.history_qformer.config.hidden_size,
+        )
+        if memory.tokens.shape != expected_tokens or not torch.is_floating_point(memory.tokens):
+            raise ValueError(f"memory tokens must be floating with shape {expected_tokens}")
+        if memory.valid_mask.dtype != torch.bool or memory.valid_mask.shape != expected_tokens[:2]:
+            raise ValueError(f"memory valid_mask must be boolean with shape {expected_tokens[:2]}")
+        return QueryMemoryEncoderOutput(
+            layerwise_query_features=current_output.layerwise_query_features,
+            query_valid_mask=current_output.query_valid_mask,
+            memory=memory,
         )
 
     def forward_prepared(self, batch: PreparedQueryMemoryBatch) -> QueryMemoryEncoderOutput:
@@ -340,6 +455,42 @@ class Qwen35QueryMemoryEncoder(nn.Module):
             query_valid_mask=current_output.query_valid_mask,
             memory=memory,
         )
+
+
+def pack_encoded_history_observations(
+    observations: Sequence[EncodedHistoryObservation],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not observations:
+        raise ValueError("observations must contain at least one encoded history observation")
+    hidden_size = observations[0].tokens.shape[-1]
+    device = observations[0].tokens.device
+    dtype = observations[0].tokens.dtype
+    if any(observation.tokens.shape[-1] != hidden_size for observation in observations):
+        raise ValueError("Encoded history observations must share a hidden size")
+    if any(observation.tokens.device != device or observation.tokens.dtype != dtype for observation in observations):
+        raise ValueError("Encoded history observations must share device and dtype")
+
+    max_tokens = max(observation.tokens.shape[0] for observation in observations)
+    packed = torch.zeros(
+        1,
+        len(observations),
+        max_tokens,
+        hidden_size,
+        dtype=dtype,
+        device=device,
+    )
+    valid_mask = torch.zeros(
+        1,
+        len(observations),
+        max_tokens,
+        dtype=torch.bool,
+        device=device,
+    )
+    for history_index, observation in enumerate(observations):
+        token_count = observation.tokens.shape[0]
+        packed[0, history_index, :token_count] = observation.tokens
+        valid_mask[0, history_index, :token_count] = observation.valid_mask
+    return packed, valid_mask
 
 
 def pack_two_camera_history_features(

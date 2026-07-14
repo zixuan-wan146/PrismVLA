@@ -28,21 +28,57 @@ Python environments and communicate through the transport-neutral policy client;
 WebSocket is the default cross-process transport. Benchmark-specific code lives in
 `experiments/libero` and `experiments/calvin`. Each benchmark keeps parameter parsing
 in `config.py` and the complete simulator/request/rollout/result flow in `eval.py`; only
-the shared wire protocol, client, and sparse-history contract live in `prism/serve`.
+the shared wire protocol, client, and history-precompute state machine live in
+`prism/serve`.
 
 The wire protocol follows StarVLA's deployment boundary: MessagePack envelopes,
 native NumPy arrays encoded as dtype/shape/raw bytes, a metadata handshake, and
-structured request IDs and errors. Images must remain contiguous `uint8` arrays;
+structured request IDs and errors. Protocol v2 has three request types:
+`reset_history`, `push_history_observation`, and `infer`. A background response
+router matches generic result envelopes by request ID and request type, so history
+work can be outstanding while the simulator executes later actions. Images must
+remain contiguous `uint8` arrays;
 do not convert them to JSON lists. WebSocket compression and message-size limits
 are disabled because image bytes are already compact and request validation occurs
 after MessagePack decoding.
 
-Every policy request carries the two ordered current views plus explicit sparse
-history. History is keyed by the same ordered view names, with two images per view,
-relative ages `[6, 3]`, and a two-element validity mask. The benchmark client captures
-local action-chunk offsets 2 and 5 and sends them at the next 8-step replan boundary.
-The server remains episode-stateless; initial requests use zero-valued history slots
-with both validity entries false.
+An `infer` request carries the two ordered current views, prompt, state,
+`stream_id`, `memory_generation`, and the previous cycle's eight canonical executed
+actions plus validity mask; it never carries historical images. History is
+precomputed during the interval between policy decisions:
+
+1. Every episode or CALVIN subtask starts with `reset_history(stream_id)`.
+2. Generation 0 inference creates invalid zero `[1, 16, 512]` memory directly. It
+   does not encode placeholder images.
+3. Immediately after local action-chunk offsets 2 and 5, the client sends a transient
+   two-camera `push_history_observation` for slots 0 and 1 of the next generation.
+4. The server applies image preprocessing and the shared vision encoder immediately.
+   At the square baseline, it retains one `[128, 1024]` visual-token tensor per slot,
+   not the source images.
+5. When slot 1 arrives, the server runs the Q-Former with ages `[6, 3]`, retains only
+   the resulting `[1, 16, 512]` memory and mask, and releases both visual-token slots.
+6. The next `infer` waits for both background push acknowledgements and consumes the
+   already prepared memory. Successful inference releases that generation's memory.
+
+“No history images are saved” means images are neither cached nor carried across a
+replan boundary. Each pushed observation is still transmitted briefly so the model
+server can run its image processor and vision encoder. Moving that encoder into the
+simulator process would duplicate the model environment and is not the accepted
+deployment. Evaluation video frames are a separate, optional artifact path.
+
+History state is bounded and local to one WebSocket connection: at most two encoded
+visual observations or one final memory are retained. A stream reset drops partial
+or ready tokens, and generation checks reject missing, duplicate, stale, or
+cross-stream observations. Explicit CALVIN subtask resets are required because task
+success can be detected after an O2/O5 observation was already pushed.
+
+The same connection owns the task-state runtime: eight width-512 state tokens and
+independent Mamba convolution/SSM caches for each token. `reset_history` resets both
+history memory and planning state. The server commits advanced task/Mamba state only
+after inference and generation bookkeeping both succeed, so retrying a failed
+generation sees the previous state. The 16 width-512 plan tokens are returned only
+in debug output today; downstream Bridge consumption and their training objectives
+are intentionally deferred.
 
 LIBERO episode limits are control-step budgets, not policy-request counts. The default
 budgets are 220, 280, 300, and 520 environment steps for `libero_spatial`,
@@ -59,6 +95,10 @@ autoencoder in the accepted inference path. After statistical
 de-normalization, each benchmark adapter explicitly clips the first six
 relative motion dimensions to its verified `[-1, 1]` controller input bounds.
 The q01/q99 normalization range is not treated as a physical safety bound.
+The client records those clipped motion values together with the thresholded
+canonical `open_01` gripper as the next request's executed-action history. Initial
+requests use eight zero rows with an all-false validity mask; dummy actions are not
+fed to the updater.
 
 The server accepts the model-agnostic `PolicyBackend` protocol and includes a
 checkpoint-aware direct implementation, `CheckpointPolicyBackend`. It verifies the
@@ -104,7 +144,8 @@ sibling environment. Use `PRISM_SERVER_URI` to connect to a server other than
 Policy connections and the initial metadata handshake are bounded by
 `PRISM_POLICY_CONNECT_TIMEOUT_SECONDS` (default 30 seconds). Every inference
 round trip is bounded by `PRISM_POLICY_INFERENCE_TIMEOUT_SECONDS` (default 120
-seconds). A timeout is a fatal infrastructure failure: evaluation aborts and
+seconds). The same bound covers reset, inference, and waiting for history-precompute
+acknowledgements. A timeout is a fatal infrastructure failure: evaluation aborts and
 the client does not silently count it as task failure or reconnect with hidden
 state.
 
@@ -128,10 +169,11 @@ serialize both camera views and state, exchange one policy request, and execute
 at least one environment step.
 
 The repository includes opt-in runtime integration tests that go further: each
-test runs nine control steps from two eight-action policy responses, verifies the
-second request contains the offset-2 and offset-5 frames, round-trips the full
-request through MessagePack, and asserts that the control-step budget is not
-mistaken for a planning-step budget. Run them in their simulator environments:
+test runs nine control steps from two eight-action policy responses, verifies that
+offset-2 and offset-5 observations are pushed for generation 1, verifies that both
+inference requests contain current images only, round-trips all payloads through
+MessagePack, and asserts that the control-step budget is not mistaken for a
+planning-step budget. Run them in their simulator environments:
 
 ```bash
 ../envs/libero/bin/python -m pip install pytest==8.3.5

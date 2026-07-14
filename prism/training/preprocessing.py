@@ -60,6 +60,8 @@ def _prepare_batch(raw_batch: Any, collator: Any, *, pin_memory: bool) -> Any:
         history_step_ages=batch.history_step_ages.pin_memory(),
         history_valid_mask=batch.history_valid_mask.pin_memory(),
         state=batch.state.pin_memory(),
+        executed_actions=batch.executed_actions.pin_memory(),
+        executed_action_valid_mask=batch.executed_action_valid_mask.pin_memory(),
         target_actions=batch.target_actions.pin_memory(),
         action_valid_mask=batch.action_valid_mask.pin_memory(),
         action_dim_mask=None if batch.action_dim_mask is None else batch.action_dim_mask.pin_memory(),

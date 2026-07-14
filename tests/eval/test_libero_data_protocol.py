@@ -25,7 +25,12 @@ def test_build_request_from_observation_uses_two_canonical_rotated_views():
         "robot0_gripper_qpos": np.array([0.04, 0.04], dtype=np.float32),
     }
 
-    request = build_request_from_observation(obs, "put the mug away")
+    request = build_request_from_observation(
+        obs,
+        "put the mug away",
+        stream_id="libero:spatial:0:0",
+        memory_generation=3,
+    )
 
     assert request.prompt == "put the mug away"
     assert request.benchmark == "libero"
@@ -33,10 +38,10 @@ def test_build_request_from_observation_uses_two_canonical_rotated_views():
     np.testing.assert_array_equal(request.images_by_view["primary"], np.rot90(agent, 2))
     np.testing.assert_array_equal(request.images_by_view["wrist"], np.rot90(wrist, 2))
     assert request.images_by_view["primary"].flags.c_contiguous
-    assert request.history_valid_mask.tolist() == [False, False]
-    assert request.history_step_ages.tolist() == [6, 3]
-    np.testing.assert_array_equal(request.history_images_by_view["primary"], np.zeros((2, 2, 2, 3), dtype=np.uint8))
+    assert not hasattr(request, "history_images_by_view")
     assert request.action_dim == 7
+    assert request.stream_id == "libero:spatial:0:0"
+    assert request.memory_generation == 3
     assert request.robot_key == "libero"
     assert request.state.shape == (8,)
 

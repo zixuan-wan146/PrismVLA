@@ -1,18 +1,28 @@
-# Outstanding CPU Distributed-Loss Verification
+# CPU Distributed-Loss Verification
 
-Status: environment-limited; not accepted as passing
+Status: accepted; passed on the remote data-disk environment
 Date: 2026-07-14
 
 ## Scope
 
-The only unfinished verification from the 2026-07-13 static-review fixes is
-`tests/training/test_distributed_loss_integration.py`. This is a real two-process
-CPU DDP integration test for the globally masked loss denominator. It does not
-require a GPU.
+`tests/training/test_distributed_loss_integration.py` is a real two-process CPU
+DDP integration test for the globally masked loss denominator. It does not
+require a GPU. The test is now accepted after a successful rerun on the remote
+data-disk environment with sufficient memory.
 
-The implementation and its ordinary CPU coverage are complete. This note does
-not classify the test as passed and does not identify a numerical assertion
-failure.
+## Accepted rerun
+
+The test passed with exit status zero on 2026-07-14 using:
+
+```bash
+CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 MALLOC_ARENA_MAX=1 \
+  ../envs/prsim/bin/pytest -q \
+  tests/training/test_distributed_loss_integration.py
+```
+
+The rerun exercised both CPU ranks, unequal valid-element counts, empty local
+transition populations, and two-step gradient accumulation. No numerical,
+distributed-protocol, or process-lifecycle failure occurred.
 
 ## What happened on the current host
 
@@ -39,24 +49,16 @@ On the same CPU-only host:
 - the two-process checkpoint failure-propagation test passed;
 - Ruff and the whitespace/diff check passed.
 
-These results do not substitute for the unfinished real-DDP loss test.
+These surrounding checks remain complementary to the accepted real-DDP rerun.
 
-## Required rerun
+## Acceptance criteria
 
-Rerun on a CPU host or container with materially more than 2 GiB of available
-memory (4 GiB is the recommended minimum for this isolated test):
-
-```bash
-CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 MALLOC_ARENA_MAX=1 \
-  pytest -q tests/training/test_distributed_loss_integration.py
-```
-
-Acceptance requires all of the following:
+The accepted test covers all of the following:
 
 1. `torch.distributed.run` exits with status 0;
 2. both learned weights equal approximately `[0.96, 0.96]`;
 3. `total_l1` equals approximately `7 / 175`;
 4. `gripper_transition_recall` equals approximately `1.0`.
 
-Until that rerun succeeds, report the item as **environment-limited and
-unverified**, not passed and not a confirmed code defect.
+The earlier `SIGKILL` attempts remain useful evidence about the 2 GiB host
+limit, but they no longer block acceptance and were not a confirmed code defect.

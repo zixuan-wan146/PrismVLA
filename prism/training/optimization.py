@@ -87,6 +87,7 @@ def _optimization_targets(model: nn.Module) -> dict[str, nn.Module | nn.Paramete
             "action_queries": backbone.action_queries,
             "history_qformer": encoder.history_qformer,
             "action_head": model.action_head,
+            "task_state_planner": model.task_state_planner,
         }
     except AttributeError as exc:
         raise TypeError("policy does not expose the accepted query-memory optimization boundaries") from exc

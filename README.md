@@ -1,6 +1,6 @@
 # PrismVLA
 
-PrismVLA is being rebuilt around a compact, layer-wise vision-language-action architecture for LIBERO and CALVIN.
+PrismVLA implements a compact layer-wise vision-language-action architecture for LIBERO and CALVIN, including session-level visual-memory precompute and persistent task-state/plan tokens.
 
 The current implementation contract and its explicitly provisional experiment
 settings are documented in [Qwen3.5 Query-Bridge Architecture

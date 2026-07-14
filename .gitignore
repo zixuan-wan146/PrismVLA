@@ -25,6 +25,7 @@ swanlab/
 **/bar/
 
 # Large artifacts
+third_party/CVPR26-OptimusVLA/
 third_party/upstream/
 third_party/starvla/
 third_party/vla-adapter/

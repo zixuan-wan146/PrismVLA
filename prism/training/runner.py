@@ -417,6 +417,8 @@ def _move_batch_to_device(batch: Any, device: torch.device) -> Any:
         history_step_ages=batch.history_step_ages.to(device=device, non_blocking=True),
         history_valid_mask=batch.history_valid_mask.to(device=device, non_blocking=True),
         state=batch.state.to(device=device, non_blocking=True),
+        executed_actions=batch.executed_actions.to(device=device, non_blocking=True),
+        executed_action_valid_mask=batch.executed_action_valid_mask.to(device=device, non_blocking=True),
         target_actions=batch.target_actions.to(device=device, non_blocking=True),
         action_valid_mask=batch.action_valid_mask.to(device=device, non_blocking=True),
         action_dim_mask=(

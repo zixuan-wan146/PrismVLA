@@ -6,3 +6,6 @@ dependencies:
   - pip
   - pip:
       - -e .[data,dev]
+      # Qwen3.5 fast path for the accepted Python 3.10 / PyTorch 2.5 CUDA environment.
+      - fla-core==0.3.2
+      - "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.0.post8/causal_conv1d-1.5.0.post8%2Bcu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"

@@ -83,6 +83,25 @@ class HistoryQFormer(nn.Module):
         self.output_norm = nn.LayerNorm(self.config.hidden_size)
         nn.init.normal_(self.memory_queries, mean=0.0, std=0.02)
 
+    def empty_memory(self, batch_size: int) -> HistoryMemoryOutput:
+        """Return invalid zero memory without running attention over placeholder images."""
+
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        return HistoryMemoryOutput(
+            tokens=self.memory_queries.new_zeros(
+                batch_size,
+                self.config.num_memory_tokens,
+                self.config.hidden_size,
+            ),
+            valid_mask=torch.zeros(
+                batch_size,
+                self.config.num_memory_tokens,
+                dtype=torch.bool,
+                device=self.memory_queries.device,
+            ),
+        )
+
     def forward(
         self,
         history_visual_tokens: torch.Tensor,

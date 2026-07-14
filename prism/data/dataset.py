@@ -199,6 +199,37 @@ class SingleVLADataset(Dataset[VLASample]):
         action_valid_mask = np.zeros((self.action_horizon,), dtype=np.bool_)
         action_valid_mask[:valid_count] = True
 
+        executed_actions = np.zeros(
+            (self.action_horizon, self.spec.action_dim),
+            dtype=np.float32,
+        )
+        executed_action_valid_mask = np.zeros((self.action_horizon,), dtype=np.bool_)
+        previous_start = max(0, frame_index - self.action_horizon)
+        if previous_start < frame_index:
+            previous_window = self.backend.read_training_window(
+                episode_id,
+                previous_start,
+                frame_index,
+            )
+            raw_executed_actions = np.asarray(previous_window.actions, dtype=np.float32)
+            previous_count = frame_index - previous_start
+            expected_previous_shape = (previous_count, self.spec.action_dim)
+            if raw_executed_actions.shape != expected_previous_shape:
+                raise ValueError(
+                    f"dataset={self.name} episode={episode_id} frame={frame_index} returned "
+                    f"previous action shape {raw_executed_actions.shape}, expected {expected_previous_shape}"
+                )
+            normalized_executed_actions = _normalized_matrix(
+                self.normalizer.normalize_action(raw_executed_actions),
+                expected_shape=expected_previous_shape,
+                label=(
+                    f"dataset={self.name} episode={episode_id} frame={frame_index} "
+                    "normalized executed action"
+                ),
+            )
+            executed_actions[-previous_count:] = normalized_executed_actions
+            executed_action_valid_mask[-previous_count:] = True
+
         policy_input = PolicyInput(
             benchmark=self.spec.benchmark,
             prompt=numeric_window.instruction,
@@ -209,6 +240,8 @@ class SingleVLADataset(Dataset[VLASample]):
             state=state,
             action_dim=self.spec.action_dim,
             robot_key=self.spec.robot_key,
+            executed_actions=executed_actions,
+            executed_action_valid_mask=executed_action_valid_mask,
         )
         return VLASample(
             policy_input=policy_input,

@@ -9,7 +9,7 @@ model:
 data:
   spec: experiments.calvin.data:CALVIN_DATA_SPEC
   root: ../benchmarks/calvin/lerobot
-  anchor_stride: 1
+  anchor_stride: 8
   include_tail: true
   train_splits: [A, B, C]
   eval_splits: [D]
@@ -56,6 +56,11 @@ optimization:
     trainable: true
     learning_rate: 1.0e-4
     weight_decay: 0.01
+  task_state_planner:
+    # Objectives and downstream plan-token consumption are intentionally deferred.
+    trainable: false
+    learning_rate: null
+    weight_decay: null
 
 trainer:
   max_steps: 30000

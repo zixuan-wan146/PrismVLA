@@ -9,7 +9,7 @@ model:
 data:
   spec: experiments.libero.data:LIBERO_DATA_SPEC
   root: ../benchmarks/libero/lerobot-v2.1-rotate180
-  anchor_stride: 1
+  anchor_stride: 8
   include_tail: true
   datasets:
     - name: libero_spatial
@@ -62,6 +62,10 @@ optimization:
     trainable: true
     learning_rate: 1.0e-4
     weight_decay: 0.01
+  task_state_planner:
+    trainable: false
+    learning_rate: null
+    weight_decay: null
 
 trainer:
   max_steps: 1

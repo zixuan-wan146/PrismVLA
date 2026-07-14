@@ -39,6 +39,7 @@ def test_calvin_config_resolves_contract_and_complete_checkpoint_snapshot(
     assert config.optimization.language_model.trainable is False
     assert config.optimization.action_queries.learning_rate == pytest.approx(1.0e-4)
     assert config.optimization.action_head.weight_decay == pytest.approx(0.01)
+    assert config.optimization.task_state_planner.trainable is False
     assert config.data.spec is CALVIN_DATA_SPEC
     assert config.data.train_splits == ("A", "B", "C")
     assert config.data.eval_splits == ("D",)
@@ -288,6 +289,14 @@ def test_phase_one_loader_rejects_persistent_workers(tmp_path: Path):
         load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
 
 
+def test_training_anchor_stride_matches_the_eight_step_planning_clock(tmp_path: Path):
+    raw, _ = _project_fixture(tmp_path, benchmark="calvin")
+    raw["data"]["anchor_stride"] = 1
+
+    with pytest.raises(ValueError, match="must equal the planning-cycle replan stride"):
+        load_train_config(_write_config(tmp_path, raw), project_root=tmp_path)
+
+
 def test_optimization_scope_and_group_values_are_explicit(tmp_path: Path):
     raw, _ = _project_fixture(tmp_path, benchmark="calvin")
     raw["optimization"]["language_model"]["learning_rate"] = 1.0e-5
@@ -306,6 +315,7 @@ def test_optimization_scope_and_group_values_are_explicit(tmp_path: Path):
         "action_queries",
         "history_qformer",
         "action_head",
+        "task_state_planner",
     ):
         raw["optimization"][name] = {
             "trainable": False,
@@ -458,7 +468,7 @@ def _project_fixture(
                 else "experiments.libero.data:LIBERO_DATA_SPEC"
             ),
             "root": "data",
-            "anchor_stride": 1,
+            "anchor_stride": 8,
             "include_tail": True,
             "datasets": datasets,
             "normalization": {
@@ -506,6 +516,11 @@ def _project_fixture(
                 "learning_rate": 1.0e-4,
                 "weight_decay": 0.01,
             },
+            "task_state_planner": {
+                "trainable": False,
+                "learning_rate": None,
+                "weight_decay": None,
+            },
         },
         "trainer": {
             "max_steps": 100,
@@ -530,8 +545,8 @@ def _architecture_values(*, resolved: bool) -> dict:
             "model_name": "Qwen/Qwen3.5-0.8B",
             "num_hidden_layers": 16,
             "hidden_size": 1024,
-            "num_action_queries": 48,
-            "image_size": 384,
+            "num_action_queries": 32,
+            "image_size": 256,
             "torch_dtype": "bfloat16",
             "local_files_only": False,
         },
@@ -541,7 +556,7 @@ def _architecture_values(*, resolved: bool) -> dict:
             "num_layers": 2,
             "num_heads": 4,
             "mlp_ratio": 4,
-            "num_memory_tokens": 24,
+            "num_memory_tokens": 16,
             "num_history_frames": 2,
             "max_relative_age": 8,
             "dropout": 0.0,
@@ -563,6 +578,26 @@ def _architecture_values(*, resolved: bool) -> dict:
         "bridge": {
             "num_layers": 16,
             "memory_gate_init": 0.1,
+        },
+        "task_state_planner": {
+            "query_layer": 12,
+            "query_input_dim": 1024,
+            "num_query_tokens": 32,
+            "hidden_size": 512,
+            "num_state_tokens": 8,
+            "num_plan_tokens": 16,
+            "action_dim": 7,
+            "action_horizon": 8,
+            "action_mlp_hidden_size": 256,
+            "mlp_hidden_size": 1024,
+            "num_attention_heads": 8,
+            "attention_dropout": 0.0,
+            "mlp_dropout": 0.0,
+            "plan_horizon_actions": 64,
+            "mamba_num_layers": 1,
+            "mamba_d_state": 16,
+            "mamba_d_conv": 4,
+            "mamba_expand": 2,
         },
     }
 

@@ -11,10 +11,22 @@ export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$DATA_ROOT/pip-cache}"
 export HF_HOME="${HF_HOME:-$DATA_ROOT/hf-home}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$DATA_ROOT/triton-cache}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$DATA_ROOT/torchinductor-cache}"
 export TMPDIR="${TMPDIR:-$DATA_ROOT/tmp}"
 PIP_INDEX_URL="${PRSIM_PIP_INDEX_URL:-https://pypi.org/simple}"
+FLA_CORE_REQUIREMENT="${PRSIM_FLA_CORE_REQUIREMENT:-fla-core==0.3.2}"
+CAUSAL_CONV1D_REQUIREMENT="${PRSIM_CAUSAL_CONV1D_REQUIREMENT:-https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.0.post8/causal_conv1d-1.5.0.post8%2Bcu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl}"
 
-mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$TMPDIR" "$(dirname "$ENV_ROOT")"
+mkdir -p \
+  "$CONDA_PKGS_DIRS" \
+  "$PIP_CACHE_DIR" \
+  "$HF_HUB_CACHE" \
+  "$TRANSFORMERS_CACHE" \
+  "$TRITON_CACHE_DIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$TMPDIR" \
+  "$(dirname "$ENV_ROOT")"
 
 if [[ ! -x "$ENV_ROOT/bin/python" ]]; then
   "$CONDA_BIN" create -y -p "$ENV_ROOT" python=3.10 pip
@@ -22,11 +34,23 @@ fi
 
 "$ENV_ROOT/bin/python" -m pip install --index-url "$PIP_INDEX_URL" --upgrade pip
 "$ENV_ROOT/bin/python" -m pip install --index-url "$PIP_INDEX_URL" -e "$PROJECT_ROOT[data,dev]"
+"$ENV_ROOT/bin/python" -m pip install \
+  --index-url "$PIP_INDEX_URL" \
+  --no-deps \
+  "$FLA_CORE_REQUIREMENT" \
+  "$CAUSAL_CONV1D_REQUIREMENT"
 
 "$ENV_ROOT/bin/python" - <<'PY'
+import causal_conv1d
+import fla
 import torch
 import transformers
+from transformers.models.qwen3_5 import modeling_qwen3_5
+
+if not modeling_qwen3_5.is_fast_path_available:
+    raise RuntimeError("Qwen3.5 fast path is unavailable after environment setup")
 
 print(f"prsim python ready: torch={torch.__version__} transformers={transformers.__version__}")
+print(f"qwen fast path ready: fla={fla.__version__} causal_conv1d={causal_conv1d.__version__}")
 print(f"cuda_available={torch.cuda.is_available()}")
 PY

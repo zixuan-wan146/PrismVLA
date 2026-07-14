@@ -19,10 +19,14 @@ from experiments.calvin.config import (
     configure_calvin_environment,
 )
 from prism.config import as_bool, load_config, parse_profile_env, print_dry_run, run_with_environment
-from prism.data.normalization import decode_gripper_for_environment
+from prism.data.normalization import decode_gripper_for_environment, decode_gripper_open
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
-from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
-from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
+from prism.serve.history import HistoryPrecomputeSchedule
+from prism.serve.protocol import (
+    HistoryObservationRequest,
+    PolicyRequest,
+    parse_action_response as parse_policy_action_response,
+)
 from prism.utils.result_writer import write_json_result_atomic
 from prism.utils.run_metadata import build_run_metadata
 from prism.utils.seeding import set_global_seed
@@ -123,21 +127,24 @@ def build_request_from_observation(
     obs: Mapping[str, Any],
     prompt: str,
     *,
-    history: SparseHistoryPayload | None = None,
+    stream_id: str,
+    memory_generation: int,
     robot_key: str | None = CALVIN_BENCHMARK,
+    executed_actions: np.ndarray | None = None,
+    executed_action_valid_mask: np.ndarray | None = None,
 ) -> PolicyRequest:
     images_by_view = build_calvin_images_by_view(obs)
-    history = empty_history_payload(images_by_view, view_names=CALVIN_VIEW_ORDER) if history is None else history
     return PolicyRequest(
         benchmark=CALVIN_BENCHMARK,
         prompt=str(prompt or ""),
         images_by_view=images_by_view,
-        history_images_by_view=history.images_by_view,
-        history_step_ages=history.step_ages,
-        history_valid_mask=history.valid_mask,
         state=build_calvin_state(obs),
         action_dim=CALVIN_ACTION_DIM,
+        stream_id=stream_id,
+        memory_generation=memory_generation,
         robot_key=robot_key,
+        executed_actions=executed_actions,
+        executed_action_valid_mask=executed_action_valid_mask,
     )
 
 
@@ -417,9 +424,19 @@ def build_policy_request(
     obs: dict[str, Any],
     *,
     prompt: str,
-    history: SparseHistoryPayload | None = None,
+    stream_id: str,
+    memory_generation: int,
+    executed_actions: np.ndarray | None = None,
+    executed_action_valid_mask: np.ndarray | None = None,
 ) -> PolicyRequest:
-    return build_request_from_observation(obs, prompt, history=history)
+    return build_request_from_observation(
+        obs,
+        prompt,
+        stream_id=stream_id,
+        memory_generation=memory_generation,
+        executed_actions=executed_actions,
+        executed_action_valid_mask=executed_action_valid_mask,
+    )
 
 
 async def run_calvin_eval(
@@ -558,20 +575,32 @@ async def rollout_subtask(
     subtask_index: int,
     log: logging.Logger,
 ) -> dict[str, Any]:
+    history_schedule = HistoryPrecomputeSchedule()
+    if config.horizon != history_schedule.replan_stride:
+        raise ValueError(
+            f"History precompute requires horizon={history_schedule.replan_stride}, got {config.horizon}"
+        )
     obs = env.get_obs()
     start_info = env.get_info()
     frames: list[np.ndarray] = []
     decision_steps = 0
     control_steps = 0
-    history_buffer = SparseHistoryBuffer(view_names=CALVIN_VIEW_ORDER)
+    stream_id = f"calvin:{sequence_id}:{subtask_index}:{subtask}"
+    previous_executed_actions = np.zeros(
+        (config.horizon, CALVIN_ACTION_DIM),
+        dtype=np.float32,
+    )
+    previous_executed_action_valid_mask = np.zeros((config.horizon,), dtype=np.bool_)
+    await policy_client.reset_history(stream_id)
     while control_steps < config.max_steps_per_subtask:
         decision_steps += 1
-        current_images = build_calvin_images_by_view(obs)
-        history = history_buffer.consume(current_images)
         request = build_policy_request(
             obs,
             prompt=prompt,
-            history=history,
+            stream_id=stream_id,
+            memory_generation=history_schedule.current_generation,
+            executed_actions=previous_executed_actions,
+            executed_action_valid_mask=previous_executed_action_valid_mask,
         )
         response = await policy_client.infer(request)
         try:
@@ -581,6 +610,10 @@ async def rollout_subtask(
             video_paths = _maybe_save_video(frames, config, sequence_id, subtask_index, subtask, "parse_error")
             return _rollout_result(False, decision_steps, control_steps, f"action_parse_error: {exc}", video_paths)
 
+        current_executed_actions = np.zeros_like(previous_executed_actions)
+        current_executed_action_valid_mask = np.zeros_like(
+            previous_executed_action_valid_mask
+        )
         for chunk_step, action_values in enumerate(action_chunk, start=1):
             action = to_calvin_action(action_values)
             try:
@@ -596,7 +629,25 @@ async def rollout_subtask(
                     video_paths,
                 )
             control_steps += 1
-            history_buffer.capture(chunk_step, build_calvin_images_by_view(obs))
+            canonical_executed_action = np.asarray(action, dtype=np.float32)
+            canonical_executed_action[6] = float(
+                decode_gripper_open(np.asarray(action_values[6], dtype=np.float32))
+            )
+            current_executed_actions[chunk_step - 1] = canonical_executed_action
+            current_executed_action_valid_mask[chunk_step - 1] = True
+            post_step_images = build_calvin_images_by_view(obs)
+            capture_target = history_schedule.target_for_step(chunk_step)
+            if capture_target is not None:
+                await policy_client.push_history_observation(
+                    HistoryObservationRequest(
+                        benchmark=CALVIN_BENCHMARK,
+                        images_by_view=post_step_images,
+                        stream_id=stream_id,
+                        target_generation=capture_target.target_generation,
+                        slot=capture_target.slot,
+                        robot_key=CALVIN_BENCHMARK,
+                    )
+                )
             if config.save_video:
                 frames.append(_compose_video_frame(obs))
 
@@ -611,6 +662,10 @@ async def rollout_subtask(
                 )
             if control_steps >= config.max_steps_per_subtask:
                 break
+        if control_steps < config.max_steps_per_subtask:
+            previous_executed_actions = current_executed_actions
+            previous_executed_action_valid_mask = current_executed_action_valid_mask
+            history_schedule.advance_generation()
     video_paths = _maybe_save_video(frames, config, sequence_id, subtask_index, subtask, "fail")
     return _rollout_result(
         False,

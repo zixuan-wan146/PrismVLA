@@ -9,12 +9,12 @@ import torch.nn as nn
 
 from prism.data.schema import VLASample
 from prism.models.action_head import DirectActionHead, decode_gripper_open
-from prism.models.batch import PolicyBatch, PolicyBatchCollator, PolicyInferenceBatch
+from prism.models.batch import PolicyBatch, PolicyBatchCollator, PolicyCurrentBatch, PolicyInferenceBatch
 from prism.models.config import DirectActionHeadConfig, PrismArchitectureConfig
 from prism.models.history_qformer import HistoryMemoryOutput
 from prism.models.policy import PrismPolicy, masked_action_l1
 from prism.models.vlm import PreparedQueryMemoryBatch, QueryMemoryEncoderOutput
-from prism.schema import PolicyInput
+from prism.schema import CurrentPolicyInput, PolicyInput
 
 
 STATE_DIM = 8
@@ -95,6 +95,8 @@ def _policy_batch(batch_size: int = 2) -> PolicyBatch:
         history_step_ages=prepared.history_step_ages,
         history_valid_mask=prepared.history_valid_mask,
         state=torch.randn(batch_size, STATE_DIM),
+        executed_actions=torch.zeros(batch_size, 8, 7),
+        executed_action_valid_mask=torch.zeros(batch_size, 8, dtype=torch.bool),
         target_actions=torch.zeros(batch_size, 8, 7),
         action_valid_mask=torch.ones(batch_size, 8, dtype=torch.bool),
         action_dim_mask=torch.ones(batch_size, 7, dtype=torch.bool),
@@ -143,6 +145,10 @@ class _RecordingPrepareEncoder:
         self.requests.extend(requests)
         return _prepared_batch_tensors(len(requests))
 
+    def prepare_current_requests(self, requests: list[CurrentPolicyInput]):
+        self.requests.extend(requests)
+        return _prepared_batch_tensors(len(requests)).current_inputs
+
 
 class _DifferentiablePreparedEncoder(nn.Module):
     def __init__(self, architecture: PrismArchitectureConfig) -> None:
@@ -189,6 +195,28 @@ class _DifferentiablePreparedEncoder(nn.Module):
             ),
         )
 
+    def forward_current_with_memory(
+        self,
+        current_inputs,
+        memory: HistoryMemoryOutput,
+    ) -> QueryMemoryEncoderOutput:
+        self.forward_calls += 1
+        batch_size = current_inputs["attention_mask"].shape[0]
+        current = self.current_features.view(1, 1, -1).expand(
+            batch_size,
+            self.architecture.backbone.num_action_queries,
+            -1,
+        )
+        return QueryMemoryEncoderOutput(
+            layerwise_query_features=tuple(current for _ in range(self.architecture.num_bridge_layers)),
+            query_valid_mask=torch.ones(
+                batch_size,
+                self.architecture.backbone.num_action_queries,
+                dtype=torch.bool,
+            ),
+            memory=memory,
+        )
+
 
 def test_direct_action_head_requires_a_resolved_architecture_config():
     with pytest.raises(ValueError, match="not resolved"):
@@ -213,7 +241,7 @@ def test_direct_action_head_uses_eight_tokens_and_returns_unbounded_actions():
 
     assert head.action_step_queries.shape == (8, 32)
     assert head.temporal_position_embeddings.shape == (8, 32)
-    assert architecture.backbone.num_action_queries == 48
+    assert architecture.backbone.num_action_queries == 32
     assert actions.shape == (2, 8, 7)
     assert torch.all(actions == 2.0)
     assert len(head.bridge.blocks) == 16
@@ -250,10 +278,10 @@ def test_action_self_attention_is_noncausal():
 
     output = block(
         action_states,
-        torch.randn(1, 48, 1024),
-        torch.ones(1, 48, dtype=torch.bool),
-        torch.zeros(1, 24, 512),
-        torch.zeros(1, 24, dtype=torch.bool),
+        torch.randn(1, 32, 1024),
+        torch.ones(1, 32, dtype=torch.bool),
+        torch.zeros(1, 16, 512),
+        torch.zeros(1, 16, dtype=torch.bool),
     )
     output[:, 0].sum().backward()
 
@@ -386,6 +414,31 @@ def test_policy_batch_collator_has_target_free_inference_path():
     assert encoder.requests[0] is policy_input
 
 
+def test_policy_batch_collator_prepares_current_only_runtime_path():
+    encoder = _RecordingPrepareEncoder()
+    collator = PolicyBatchCollator(
+        _resolved_architecture(),
+        encoder,
+        state_dim=STATE_DIM,
+    )
+    policy_input = _vla_sample().policy_input
+    current_input = CurrentPolicyInput(
+        benchmark=policy_input.benchmark,
+        prompt=policy_input.prompt,
+        images_by_view=policy_input.images_by_view,
+        state=policy_input.state,
+        action_dim=policy_input.action_dim,
+        robot_key=policy_input.robot_key,
+    )
+
+    batch = collator.collate_current_inference([current_input])
+
+    assert isinstance(batch, PolicyCurrentBatch)
+    assert not hasattr(batch, "history_inputs")
+    assert batch.state.shape == (1, STATE_DIM)
+    assert encoder.requests == [current_input]
+
+
 def test_collator_rejects_a_state_width_mismatch_before_processor_work():
     encoder = _RecordingPrepareEncoder()
     collator = PolicyBatchCollator(
@@ -439,6 +492,8 @@ def test_prism_policy_predict_and_forward_share_prediction_path_without_fake_los
         history_step_ages=training_batch.history_step_ages,
         history_valid_mask=training_batch.history_valid_mask,
         state=training_batch.state,
+        executed_actions=training_batch.executed_actions,
+        executed_action_valid_mask=training_batch.executed_action_valid_mask,
     )
 
     with torch.no_grad():
@@ -449,3 +504,72 @@ def test_prism_policy_predict_and_forward_share_prediction_path_without_fake_los
     assert encoder.forward_calls == 2
     assert isinstance(inference_prediction, torch.Tensor)
     assert not hasattr(inference_prediction, "loss")
+
+
+def test_prism_policy_predicts_with_precomputed_memory_without_history_inputs():
+    architecture = _resolved_architecture()
+    encoder = _DifferentiablePreparedEncoder(architecture)
+    policy = PrismPolicy(architecture, encoder, state_dim=STATE_DIM).eval()
+    prepared = _prepared_batch_tensors(1)
+    batch = PolicyCurrentBatch(
+        current_inputs=prepared.current_inputs,
+        state=torch.zeros(1, STATE_DIM),
+        executed_actions=torch.zeros(1, 8, 7),
+        executed_action_valid_mask=torch.zeros(1, 8, dtype=torch.bool),
+    )
+    memory = HistoryMemoryOutput(
+        tokens=torch.randn(1, architecture.history.num_memory_tokens, architecture.history.hidden_size),
+        valid_mask=torch.ones(1, architecture.history.num_memory_tokens, dtype=torch.bool),
+    )
+
+    with torch.no_grad():
+        prediction = policy.predict_with_memory(batch, memory)
+
+    assert prediction.shape == (1, 8, 7)
+    assert encoder.forward_calls == 1
+
+
+def test_runtime_cycle_selects_qwen_layer12_and_returns_state_and_plan_tokens():
+    architecture = _resolved_architecture()
+
+    class LayerNumberEncoder(_DifferentiablePreparedEncoder):
+        def forward_current_with_memory(self, current_inputs, memory):
+            output = super().forward_current_with_memory(current_inputs, memory)
+            return QueryMemoryEncoderOutput(
+                layerwise_query_features=tuple(
+                    torch.full_like(output.layerwise_query_features[0], float(layer))
+                    for layer in range(1, 17)
+                ),
+                query_valid_mask=output.query_valid_mask,
+                memory=output.memory,
+            )
+
+    encoder = LayerNumberEncoder(architecture)
+    policy = PrismPolicy(architecture, encoder, state_dim=STATE_DIM).eval()
+    prepared = _prepared_batch_tensors(1)
+    batch = PolicyCurrentBatch(
+        current_inputs=prepared.current_inputs,
+        state=torch.zeros(1, STATE_DIM),
+        executed_actions=torch.zeros(1, 8, 7),
+        executed_action_valid_mask=torch.zeros(1, 8, dtype=torch.bool),
+    )
+    memory = HistoryMemoryOutput(
+        tokens=torch.zeros(1, 16, 512),
+        valid_mask=torch.zeros(1, 16, dtype=torch.bool),
+    )
+    observed = []
+    handle = policy.task_state_planner.shared_query_projection.register_forward_pre_hook(
+        lambda _module, args: observed.append(args[0].detach().clone())
+    )
+    try:
+        with torch.inference_mode():
+            output = policy.predict_with_memory_and_plan(batch, memory)
+    finally:
+        handle.remove()
+
+    assert encoder.forward_calls == 1
+    assert len(observed) == 1
+    assert torch.all(observed[0] == 12.0)
+    assert output.predicted_actions.shape == (1, 8, 7)
+    assert output.task_state.shape == (1, 8, 512)
+    assert output.plan_tokens.shape == (1, 16, 512)

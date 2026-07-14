@@ -8,14 +8,45 @@ from typing import Any
 
 import numpy as np
 
-from prism.schema import PolicyInput
+
+MAX_STREAM_ID_LENGTH = 256
+EXECUTED_ACTION_HORIZON = 8
 
 
 @dataclass(frozen=True)
-class PolicyRequest(PolicyInput):
-    """Validated wire request compatible with the model-facing PolicyInput."""
+class PolicyRequest:
+    """Current-observation inference request referencing server-side memory."""
 
+    benchmark: str
+    prompt: str
+    images_by_view: Mapping[str, np.ndarray]
+    state: np.ndarray
+    action_dim: int
+    stream_id: str
+    memory_generation: int
+    robot_key: str | None = None
     return_debug: bool = False
+    executed_actions: np.ndarray | None = None
+    executed_action_valid_mask: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class HistoryObservationRequest:
+    """Transient two-camera observation encoded immediately by the model server."""
+
+    benchmark: str
+    images_by_view: Mapping[str, np.ndarray]
+    stream_id: str
+    target_generation: int
+    slot: int
+    robot_key: str | None = None
+
+
+@dataclass(frozen=True)
+class HistoryResetRequest:
+    """Explicit episode/subtask boundary for one connection-local stream."""
+
+    stream_id: str
 
 
 def policy_request_from_mapping(data: Mapping[str, Any]) -> PolicyRequest:
@@ -26,13 +57,18 @@ def policy_request_from_mapping(data: Mapping[str, Any]) -> PolicyRequest:
         "benchmark",
         "prompt",
         "images_by_view",
-        "history_images_by_view",
-        "history_step_ages",
-        "history_valid_mask",
         "state",
         "action_dim",
+        "stream_id",
+        "memory_generation",
     )
-    allowed_fields = {*required_fields, "robot_key", "return_debug"}
+    allowed_fields = {
+        *required_fields,
+        "robot_key",
+        "return_debug",
+        "executed_actions",
+        "executed_action_valid_mask",
+    }
     unknown = sorted(str(field) for field in data if field not in allowed_fields)
     if unknown:
         raise ValueError(f"Unsupported policy request fields: {unknown}")
@@ -43,34 +79,55 @@ def policy_request_from_mapping(data: Mapping[str, Any]) -> PolicyRequest:
     benchmark = str(data["benchmark"])
     prompt = "" if data["prompt"] is None else str(data["prompt"])
     images_by_view = _validate_images_by_view(data["images_by_view"])
-    history_step_ages = _validate_history_step_ages(data["history_step_ages"])
-    history_valid_mask = _validate_history_valid_mask(data["history_valid_mask"], history_step_ages.shape[0])
-    history_images_by_view = _validate_history_images_by_view(
-        data["history_images_by_view"],
-        images_by_view,
-        history_step_ages.shape[0],
-    )
     state = _validate_vector(data["state"], "state")
     action_dim = _positive_int(data["action_dim"], "action_dim")
+    stream_id = _validate_stream_id(data["stream_id"])
+    memory_generation = _nonnegative_int(data["memory_generation"], "memory_generation")
     robot_key = data.get("robot_key")
     if robot_key is not None:
         robot_key = str(robot_key)
+    return_debug = data.get("return_debug", False)
+    if not isinstance(return_debug, (bool, np.bool_)):
+        raise ValueError(f"return_debug must be boolean, got {return_debug!r}")
+    executed_actions, executed_action_valid_mask = _validate_executed_action_history(
+        data.get("executed_actions"),
+        data.get("executed_action_valid_mask"),
+        action_dim=action_dim,
+    )
 
     return PolicyRequest(
         benchmark=benchmark,
         prompt=prompt,
         images_by_view=images_by_view,
-        history_images_by_view=history_images_by_view,
-        history_step_ages=history_step_ages,
-        history_valid_mask=history_valid_mask,
         state=state,
         action_dim=action_dim,
+        stream_id=stream_id,
+        memory_generation=memory_generation,
         robot_key=robot_key,
-        return_debug=bool(data.get("return_debug", False)),
+        return_debug=bool(return_debug),
+        executed_actions=executed_actions,
+        executed_action_valid_mask=executed_action_valid_mask,
     )
 
 
 def policy_request_to_mapping(request: PolicyRequest) -> dict[str, Any]:
+    if not isinstance(request, PolicyRequest):
+        raise TypeError(f"request must be PolicyRequest, got {type(request).__name__}")
+    request = policy_request_from_mapping(
+        {
+            "benchmark": request.benchmark,
+            "prompt": request.prompt,
+            "images_by_view": request.images_by_view,
+            "state": request.state,
+            "action_dim": request.action_dim,
+            "stream_id": request.stream_id,
+            "memory_generation": request.memory_generation,
+            "robot_key": request.robot_key,
+            "return_debug": request.return_debug,
+            "executed_actions": request.executed_actions,
+            "executed_action_valid_mask": request.executed_action_valid_mask,
+        }
+    )
     payload: dict[str, Any] = {
         "benchmark": request.benchmark,
         "prompt": request.prompt,
@@ -78,19 +135,93 @@ def policy_request_to_mapping(request: PolicyRequest) -> dict[str, Any]:
             view_name: np.ascontiguousarray(image, dtype=np.uint8)
             for view_name, image in request.images_by_view.items()
         },
-        "history_images_by_view": {
-            view_name: np.ascontiguousarray(images, dtype=np.uint8)
-            for view_name, images in request.history_images_by_view.items()
-        },
-        "history_step_ages": np.asarray(request.history_step_ages, dtype=np.int32),
-        "history_valid_mask": np.asarray(request.history_valid_mask, dtype=np.bool_),
         "state": np.asarray(request.state, dtype=np.float32),
         "action_dim": int(request.action_dim),
+        "stream_id": request.stream_id,
+        "memory_generation": int(request.memory_generation),
         "robot_key": request.robot_key,
+        "executed_actions": np.asarray(request.executed_actions, dtype=np.float32),
+        "executed_action_valid_mask": np.asarray(
+            request.executed_action_valid_mask,
+            dtype=np.bool_,
+        ),
     }
     if request.return_debug:
         payload["return_debug"] = True
     return payload
+
+
+def history_observation_from_mapping(data: Mapping[str, Any]) -> HistoryObservationRequest:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"History observation must be a mapping, got {type(data).__name__}")
+    required_fields = (
+        "benchmark",
+        "images_by_view",
+        "stream_id",
+        "target_generation",
+        "slot",
+    )
+    allowed_fields = {*required_fields, "robot_key"}
+    unknown = sorted(str(field) for field in data if field not in allowed_fields)
+    if unknown:
+        raise ValueError(f"Unsupported history observation fields: {unknown}")
+    missing = [field for field in required_fields if field not in data]
+    if missing:
+        raise ValueError(f"Missing required history observation fields: {missing}")
+    robot_key = data.get("robot_key")
+    return HistoryObservationRequest(
+        benchmark=str(data["benchmark"]),
+        images_by_view=_validate_images_by_view(data["images_by_view"]),
+        stream_id=_validate_stream_id(data["stream_id"]),
+        target_generation=_positive_int(data["target_generation"], "target_generation"),
+        slot=_history_slot(data["slot"]),
+        robot_key=None if robot_key is None else str(robot_key),
+    )
+
+
+def history_observation_to_mapping(request: HistoryObservationRequest) -> dict[str, Any]:
+    if not isinstance(request, HistoryObservationRequest):
+        raise TypeError(
+            f"request must be HistoryObservationRequest, got {type(request).__name__}"
+        )
+    request = history_observation_from_mapping(
+        {
+            "benchmark": request.benchmark,
+            "images_by_view": request.images_by_view,
+            "stream_id": request.stream_id,
+            "target_generation": request.target_generation,
+            "slot": request.slot,
+            "robot_key": request.robot_key,
+        }
+    )
+    return {
+        "benchmark": request.benchmark,
+        "images_by_view": {
+            view_name: np.ascontiguousarray(image, dtype=np.uint8)
+            for view_name, image in request.images_by_view.items()
+        },
+        "stream_id": request.stream_id,
+        "target_generation": int(request.target_generation),
+        "slot": int(request.slot),
+        "robot_key": request.robot_key,
+    }
+
+
+def history_reset_from_mapping(data: Mapping[str, Any]) -> HistoryResetRequest:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"History reset must be a mapping, got {type(data).__name__}")
+    unknown = sorted(str(field) for field in data if field != "stream_id")
+    if unknown:
+        raise ValueError(f"Unsupported history reset fields: {unknown}")
+    if "stream_id" not in data:
+        raise ValueError("Missing required history reset field: stream_id")
+    return HistoryResetRequest(stream_id=_validate_stream_id(data["stream_id"]))
+
+
+def history_reset_to_mapping(request: HistoryResetRequest) -> dict[str, Any]:
+    if not isinstance(request, HistoryResetRequest):
+        raise TypeError(f"request must be HistoryResetRequest, got {type(request).__name__}")
+    return {"stream_id": _validate_stream_id(request.stream_id)}
 
 
 def _validate_images_by_view(value: Any) -> dict[str, np.ndarray]:
@@ -100,7 +231,9 @@ def _validate_images_by_view(value: Any) -> dict[str, np.ndarray]:
         raise ValueError("images_by_view must contain at least one image")
     images = {}
     for view_name, image in value.items():
-        name = str(view_name)
+        if not isinstance(view_name, str):
+            raise ValueError(f"view names must be strings, got {type(view_name).__name__}")
+        name = view_name
         if not name:
             raise ValueError("view names must be non-empty")
         images[name] = _validate_image_array(image, f"images_by_view[{name!r}]")
@@ -124,55 +257,6 @@ def _validate_image_array(value: Any, field_name: str) -> np.ndarray:
     return np.asarray(array, dtype=np.uint8)
 
 
-def _validate_history_step_ages(value: Any) -> np.ndarray:
-    ages = np.asarray(value)
-    if ages.ndim != 1 or ages.shape[0] != 2:
-        raise ValueError(f"history_step_ages must have shape [2], got {ages.shape}")
-    if not np.issubdtype(ages.dtype, np.integer):
-        raise ValueError("history_step_ages must contain integers")
-    ages = ages.astype(np.int32, copy=False)
-    if tuple(ages.tolist()) != (6, 3):
-        raise ValueError(f"history_step_ages must equal the accepted [6, 3] schedule, got {ages.tolist()}")
-    return np.ascontiguousarray(ages)
-
-
-def _validate_history_valid_mask(value: Any, history_count: int) -> np.ndarray:
-    mask = np.asarray(value)
-    if mask.shape != (history_count,):
-        raise ValueError(f"history_valid_mask must have shape [{history_count}], got {mask.shape}")
-    if not np.issubdtype(mask.dtype, np.bool_):
-        raise ValueError("history_valid_mask must be boolean")
-    return np.ascontiguousarray(mask, dtype=np.bool_)
-
-
-def _validate_history_images_by_view(
-    value: Any,
-    current_images_by_view: Mapping[str, np.ndarray],
-    history_count: int,
-) -> dict[str, np.ndarray]:
-    if not isinstance(value, Mapping):
-        raise ValueError("history_images_by_view must be an object mapping view name to image sequence")
-    if tuple(value) != tuple(current_images_by_view):
-        raise ValueError(
-            "history_images_by_view must have the same ordered view names as images_by_view: "
-            f"expected {tuple(current_images_by_view)}, got {tuple(value)}"
-        )
-    history: dict[str, np.ndarray] = {}
-    for view_name, current_image in current_images_by_view.items():
-        images = np.asarray(value[view_name])
-        expected_shape = (history_count, *current_image.shape)
-        if images.shape != expected_shape:
-            raise ValueError(
-                f"history_images_by_view[{view_name!r}] must have shape {expected_shape}, got {images.shape}"
-            )
-        if not np.issubdtype(images.dtype, np.number) and not np.issubdtype(images.dtype, np.bool_):
-            raise ValueError(f"history_images_by_view[{view_name!r}] must contain numeric pixels")
-        if not np.isfinite(images).all() or images.min() < 0 or images.max() > 255:
-            raise ValueError(f"history_images_by_view[{view_name!r}] pixels must be finite and in 0..255")
-        history[view_name] = np.ascontiguousarray(images, dtype=np.uint8)
-    return history
-
-
 def _validate_vector(value: Any, field_name: str) -> np.ndarray:
     array = np.asarray(value, dtype=np.float32).reshape(-1)
     if array.size == 0:
@@ -182,14 +266,77 @@ def _validate_vector(value: Any, field_name: str) -> np.ndarray:
     return array
 
 
+def _validate_executed_action_history(
+    actions_value: Any,
+    mask_value: Any,
+    *,
+    action_dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if actions_value is None and mask_value is None:
+        return (
+            np.zeros((EXECUTED_ACTION_HORIZON, action_dim), dtype=np.float32),
+            np.zeros((EXECUTED_ACTION_HORIZON,), dtype=np.bool_),
+        )
+    if actions_value is None or mask_value is None:
+        raise ValueError(
+            "executed_actions and executed_action_valid_mask must be provided together"
+        )
+    actions = np.asarray(actions_value)
+    expected_actions = (EXECUTED_ACTION_HORIZON, action_dim)
+    if actions.shape != expected_actions or not np.issubdtype(actions.dtype, np.floating):
+        raise ValueError(
+            f"executed_actions must be floating with shape {expected_actions}, got {actions.shape}"
+        )
+    if not np.isfinite(actions).all():
+        raise ValueError("executed_actions must contain only finite values")
+    mask = np.asarray(mask_value)
+    if mask.dtype != np.bool_ or mask.shape != (EXECUTED_ACTION_HORIZON,):
+        raise ValueError(
+            "executed_action_valid_mask must be boolean with shape "
+            f"({EXECUTED_ACTION_HORIZON},)"
+        )
+    if np.any(actions[~mask] != 0):
+        raise ValueError("executed_actions must be zero at invalid positions")
+    return np.ascontiguousarray(actions, dtype=np.float32), np.ascontiguousarray(mask)
+
+
+def _validate_stream_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"stream_id must be a string, got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError("stream_id must not be empty")
+    if len(value) > MAX_STREAM_ID_LENGTH:
+        raise ValueError(
+            f"stream_id must be at most {MAX_STREAM_ID_LENGTH} characters, got {len(value)}"
+        )
+    return value
+
+
+def _integer(value: Any, field_name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{field_name} must be an integer, got {value!r}")
+    return int(value)
+
+
 def _positive_int(value: Any, field_name: str) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be a positive integer, got {value!r}") from exc
+    parsed = _integer(value, field_name)
     if parsed <= 0:
         raise ValueError(f"{field_name} must be positive, got {parsed}")
     return parsed
+
+
+def _nonnegative_int(value: Any, field_name: str) -> int:
+    parsed = _integer(value, field_name)
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be non-negative, got {parsed}")
+    return parsed
+
+
+def _history_slot(value: Any) -> int:
+    slot = _nonnegative_int(value, "slot")
+    if slot not in (0, 1):
+        raise ValueError(f"slot must be 0 or 1, got {slot}")
+    return slot
 
 
 def parse_action_response(

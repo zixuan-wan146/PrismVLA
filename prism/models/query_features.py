@@ -10,7 +10,7 @@ def gather_layerwise_action_queries(
     action_query_mask: torch.Tensor,
     *,
     num_backbone_layers: int = 16,
-    num_action_queries: int = 48,
+    num_action_queries: int = 32,
     hidden_size: int = 1024,
 ) -> tuple[torch.Tensor, ...]:
     """Gather H1..HN action-query states while explicitly excluding H0."""

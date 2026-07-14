@@ -7,8 +7,13 @@ import torch
 import torch.nn as nn
 
 from prism.models.action_head import DirectActionHead, decode_gripper_open
-from prism.models.batch import PolicyBatch, PolicyBatchCollator, PolicyInferenceBatch
+from prism.models.batch import PolicyBatch, PolicyBatchCollator, PolicyCurrentBatch, PolicyInferenceBatch
 from prism.models.config import PrismArchitectureConfig
+from prism.models.history_qformer import HistoryMemoryOutput
+from prism.models.task_state_planner import (
+    TaskStatePlanPipeline,
+    TaskStatePlannerRuntimeState,
+)
 from prism.models.vlm import PreparedQueryMemoryBatch, Qwen35QueryMemoryEncoder
 
 
@@ -63,6 +68,16 @@ class PolicyOutput:
         return self.loss_statistics.metric_values
 
 
+@dataclass(frozen=True)
+class PolicyRuntimeOutput:
+    """Action chunk plus the session state and coarse plan produced this cycle."""
+
+    predicted_actions: torch.Tensor
+    task_state: torch.Tensor
+    plan_tokens: torch.Tensor
+    planning_state: TaskStatePlannerRuntimeState
+
+
 class PrismPolicy(nn.Module):
     """End-to-end query-memory encoder and direct masked-L1 policy."""
 
@@ -81,6 +96,7 @@ class PrismPolicy(nn.Module):
         self.query_memory_encoder = query_memory_encoder
         self.state_dim = state_dim
         self.action_head = DirectActionHead(architecture, state_dim=state_dim)
+        self.task_state_planner = TaskStatePlanPipeline(architecture.task_state_planner)
 
     def make_collator(self) -> PolicyBatchCollator:
         """Create the CPU-side collator paired with this model's encoder."""
@@ -117,6 +133,69 @@ class PrismPolicy(nn.Module):
             raise TypeError(f"PrismPolicy.predict expects PolicyInferenceBatch, got {type(batch).__name__}")
         batch.validate_against(self.architecture, state_dim=self.state_dim)
         return self._predict_actions(batch)
+
+    def predict_with_memory(
+        self,
+        batch: PolicyCurrentBatch,
+        memory: HistoryMemoryOutput,
+    ) -> torch.Tensor:
+        """Predict from current inputs and session-precomputed fixed-size memory."""
+
+        if not isinstance(batch, PolicyCurrentBatch):
+            raise TypeError(f"PrismPolicy.predict_with_memory expects PolicyCurrentBatch, got {type(batch).__name__}")
+        if not isinstance(memory, HistoryMemoryOutput):
+            raise TypeError(f"memory must be HistoryMemoryOutput, got {type(memory).__name__}")
+        batch.validate_against(self.architecture, state_dim=self.state_dim)
+        encoder_output = self.query_memory_encoder.forward_current_with_memory(
+            batch.current_inputs,
+            memory,
+        )
+        return self.action_head(encoder_output, batch.state)
+
+    def predict_with_memory_and_plan(
+        self,
+        batch: PolicyCurrentBatch,
+        memory: HistoryMemoryOutput,
+        planning_state: TaskStatePlannerRuntimeState | None = None,
+    ) -> PolicyRuntimeOutput:
+        """Run one planning cycle and advance connection-local task/Mamba state."""
+
+        if not isinstance(batch, PolicyCurrentBatch):
+            raise TypeError(
+                "PrismPolicy.predict_with_memory_and_plan expects PolicyCurrentBatch, "
+                f"got {type(batch).__name__}"
+            )
+        if not isinstance(memory, HistoryMemoryOutput):
+            raise TypeError(f"memory must be HistoryMemoryOutput, got {type(memory).__name__}")
+        if planning_state is not None and not isinstance(
+            planning_state,
+            TaskStatePlannerRuntimeState,
+        ):
+            raise TypeError(
+                "planning_state must be TaskStatePlannerRuntimeState or None, "
+                f"got {type(planning_state).__name__}"
+            )
+        batch.validate_against(self.architecture, state_dim=self.state_dim)
+        encoder_output = self.query_memory_encoder.forward_current_with_memory(
+            batch.current_inputs,
+            memory,
+        )
+        predicted_actions = self.action_head(encoder_output, batch.state)
+        query_layer_index = self.architecture.task_state_planner.query_layer - 1
+        query_layer12 = encoder_output.layerwise_query_features[query_layer_index]
+        state_plan = self.task_state_planner(
+            query_layer12,
+            batch.executed_actions,
+            batch.executed_action_valid_mask,
+            query_valid_mask=encoder_output.query_valid_mask,
+            previous_state=planning_state,
+        )
+        return PolicyRuntimeOutput(
+            predicted_actions=predicted_actions,
+            task_state=state_plan.task_state,
+            plan_tokens=state_plan.plan_tokens,
+            planning_state=state_plan.runtime_state,
+        )
 
     def _predict_actions(self, batch: PolicyInferenceBatch) -> torch.Tensor:
         """Shared encoder/action-head path used by training and inference."""

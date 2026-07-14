@@ -35,6 +35,7 @@ class _PolicyFixture(nn.Module):
         super().__init__()
         self.query_memory_encoder = _EncoderFixture()
         self.action_head = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4))
+        self.task_state_planner = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4))
 
 
 def _group(
@@ -62,6 +63,7 @@ def _config() -> ResolvedOptimizationConfig:
         action_queries=_group(True, learning_rate=1.0e-4, weight_decay=0.0),
         history_qformer=_group(True, learning_rate=2.0e-4, weight_decay=0.01),
         action_head=_group(True, learning_rate=3.0e-4, weight_decay=0.02),
+        task_state_planner=_group(False),
     )
 
 
@@ -79,6 +81,8 @@ def test_build_optimizer_applies_explicit_scope_and_named_groups() -> None:
     assert model.query_memory_encoder.backbone.action_queries.requires_grad
     assert all(parameter.requires_grad for parameter in model.query_memory_encoder.history_qformer.parameters())
     assert all(parameter.requires_grad for parameter in model.action_head.parameters())
+    assert not model.task_state_planner.training
+    assert all(not parameter.requires_grad for parameter in model.task_state_planner.parameters())
 
     groups = {group["group_name"]: group for group in optimizer.param_groups}
     assert set(groups) == {

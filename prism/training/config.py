@@ -42,6 +42,7 @@ OPTIMIZATION_GROUP_NAMES = (
     "action_queries",
     "history_qformer",
     "action_head",
+    "task_state_planner",
 )
 
 
@@ -94,6 +95,7 @@ class ResolvedOptimizationConfig:
     action_queries: ResolvedOptimizationGroupConfig
     history_qformer: ResolvedOptimizationGroupConfig
     action_head: ResolvedOptimizationGroupConfig
+    task_state_planner: ResolvedOptimizationGroupConfig
 
     def named_groups(self) -> tuple[tuple[str, ResolvedOptimizationGroupConfig], ...]:
         return tuple((name, getattr(self, name)) for name in OPTIMIZATION_GROUP_NAMES)
@@ -286,6 +288,15 @@ def load_train_config(
     spec_reference = _text(data_raw["spec"], "data.spec")
     data_spec = _import_data_spec(spec_reference)
     temporal = _derive_and_validate_contract(data_spec, architecture)
+    anchor_stride = _positive_int(
+        data_raw["anchor_stride"],
+        "data.anchor_stride",
+    )
+    if anchor_stride != temporal.replan_stride:
+        raise ValueError(
+            "data.anchor_stride must equal the planning-cycle replan stride: "
+            f"{anchor_stride} != {temporal.replan_stride}"
+        )
 
     data_root = _resolve_declared_path(
         data_raw["root"],
@@ -445,10 +456,7 @@ def load_train_config(
             spec_reference=spec_reference,
             spec=data_spec,
             root=data_root,
-            anchor_stride=_positive_int(
-                data_raw["anchor_stride"],
-                "data.anchor_stride",
-            ),
+            anchor_stride=anchor_stride,
             include_tail=_boolean(
                 data_raw["include_tail"],
                 "data.include_tail",

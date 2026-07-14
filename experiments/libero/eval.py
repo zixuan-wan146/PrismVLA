@@ -16,10 +16,14 @@ import numpy as np
 from experiments.libero.config import LiberoClientConfig, configure_mujoco_environment
 from experiments.libero.data import LIBERO_IMAGE_TRANSFORM
 from prism.config import as_bool, load_config, parse_profile_env, print_dry_run, run_with_environment
-from prism.data.normalization import decode_gripper_for_environment
+from prism.data.normalization import decode_gripper_for_environment, decode_gripper_open
 from prism.serve.client import PolicyClient, WebSocketPolicyClient
-from prism.serve.history import SparseHistoryBuffer, SparseHistoryPayload, empty_history_payload
-from prism.serve.protocol import PolicyRequest, parse_action_response as parse_policy_action_response
+from prism.serve.history import HistoryPrecomputeSchedule
+from prism.serve.protocol import (
+    HistoryObservationRequest,
+    PolicyRequest,
+    parse_action_response as parse_policy_action_response,
+)
 from prism.utils.result_writer import write_json_result_atomic
 from prism.utils.run_metadata import build_run_metadata
 from prism.utils.seeding import set_global_seed
@@ -112,21 +116,24 @@ def build_request_from_observation(
     obs: Mapping[str, Any],
     prompt: str,
     *,
-    history: SparseHistoryPayload | None = None,
+    stream_id: str,
+    memory_generation: int,
     robot_key: str | None = LIBERO_BENCHMARK,
+    executed_actions: np.ndarray | None = None,
+    executed_action_valid_mask: np.ndarray | None = None,
 ) -> PolicyRequest:
     images_by_view = build_libero_images_by_view(obs)
-    history = empty_history_payload(images_by_view, view_names=LIBERO_VIEW_ORDER) if history is None else history
     return PolicyRequest(
         benchmark=LIBERO_BENCHMARK,
         prompt=str(prompt or ""),
         images_by_view=images_by_view,
-        history_images_by_view=history.images_by_view,
-        history_step_ages=history.step_ages,
-        history_valid_mask=history.valid_mask,
         state=build_libero_state(obs),
         action_dim=LIBERO_ACTION_DIM,
+        stream_id=stream_id,
+        memory_generation=memory_generation,
         robot_key=robot_key,
+        executed_actions=executed_actions,
+        executed_action_valid_mask=executed_action_valid_mask,
     )
 
 
@@ -234,9 +241,20 @@ LOG = logging.getLogger(__name__)
 def build_policy_request(
     obs: Any,
     prompt: str,
-    history: SparseHistoryPayload | None = None,
+    *,
+    stream_id: str,
+    memory_generation: int,
+    executed_actions: np.ndarray | None = None,
+    executed_action_valid_mask: np.ndarray | None = None,
 ) -> PolicyRequest:
-    return build_request_from_observation(obs, prompt, history=history)
+    return build_request_from_observation(
+        obs,
+        prompt,
+        stream_id=stream_id,
+        memory_generation=memory_generation,
+        executed_actions=executed_actions,
+        executed_action_valid_mask=executed_action_valid_mask,
+    )
 
 
 def configure_logging(config: LiberoClientConfig) -> None:
@@ -342,6 +360,7 @@ async def run(
                         env=env,
                         initial_obs=obs,
                         prompt=str(task_description),
+                        stream_id=f"libero:{task_suite_name}:{task_id}:{episode_id}",
                         horizon=horizon,
                         max_steps=max_steps,
                     )
@@ -411,22 +430,39 @@ async def _rollout_episode(
     env: Any,
     initial_obs: Any,
     prompt: str,
+    stream_id: str,
     horizon: int,
     max_steps: int,
 ) -> dict[str, Any]:
+    history_schedule = HistoryPrecomputeSchedule()
+    if horizon != history_schedule.replan_stride:
+        raise ValueError(
+            f"History precompute requires horizon={history_schedule.replan_stride}, got {horizon}"
+        )
     obs = initial_obs
     decision_steps = 0
     control_steps = 0
     frames: list[np.ndarray] = []
     gripper_values: list[float] = []
     failure_reason = ""
-    history_buffer = SparseHistoryBuffer(view_names=LIBERO_VIEW_ORDER)
+    previous_executed_actions = np.zeros(
+        (horizon, LIBERO_ACTION_DIM),
+        dtype=np.float32,
+    )
+    previous_executed_action_valid_mask = np.zeros((horizon,), dtype=np.bool_)
+    await client.reset_history(stream_id)
 
     while control_steps < max_steps:
         step = decision_steps
         decision_steps += 1
-        current_images = build_libero_images_by_view(obs)
-        request = build_policy_request(obs, prompt, history=history_buffer.consume(current_images))
+        request = build_policy_request(
+            obs,
+            prompt,
+            stream_id=stream_id,
+            memory_generation=history_schedule.current_generation,
+            executed_actions=previous_executed_actions,
+            executed_action_valid_mask=previous_executed_action_valid_mask,
+        )
         result = await client.infer(request)
         LOG.debug("[Step %s] Send observation", step)
         try:
@@ -439,26 +475,49 @@ async def _rollout_episode(
 
         episode_done = False
         episode_failed = False
+        current_executed_actions = np.zeros_like(previous_executed_actions)
+        current_executed_action_valid_mask = np.zeros_like(
+            previous_executed_action_valid_mask
+        )
         for chunk_step, action_values in enumerate(actions, start=1):
             action = to_libero_action(action_values)
             gripper_values.append(float(action[6]))
             try:
                 obs, reward, done, info = env.step(action)
                 control_steps += 1
-                history_buffer.capture(chunk_step, build_libero_images_by_view(obs))
             except ValueError as exc:
                 failure_reason = f"invalid_action: {exc}"
                 LOG.error("Action is not valid: %s", exc)
                 episode_failed = True
                 break
+
             except Exception as exc:
                 failure_reason = f"env_step_error: {exc}"
                 LOG.error("LIBERO environment step failed: %s", exc)
                 episode_failed = True
                 break
 
-            video_images = build_libero_images_by_view(obs)
-            frames.append(np.hstack([video_images["primary"], video_images["wrist"]]))
+            canonical_executed_action = np.asarray(action, dtype=np.float32)
+            canonical_executed_action[6] = float(
+                decode_gripper_open(np.asarray(action_values[6], dtype=np.float32))
+            )
+            current_executed_actions[chunk_step - 1] = canonical_executed_action
+            current_executed_action_valid_mask[chunk_step - 1] = True
+
+            post_step_images = build_libero_images_by_view(obs)
+            capture_target = history_schedule.target_for_step(chunk_step)
+            if capture_target is not None:
+                await client.push_history_observation(
+                    HistoryObservationRequest(
+                        benchmark=LIBERO_BENCHMARK,
+                        images_by_view=post_step_images,
+                        stream_id=stream_id,
+                        target_generation=capture_target.target_generation,
+                        slot=capture_target.slot,
+                        robot_key=LIBERO_BENCHMARK,
+                    )
+                )
+            frames.append(np.hstack([post_step_images["primary"], post_step_images["wrist"]]))
             LOG.debug("[Step %s] reward=%.2f, done=%s, info=%s", step, reward, done, info)
             if done:
                 LOG.info("Task completed")
@@ -477,6 +536,10 @@ async def _rollout_episode(
             }
         if episode_failed:
             break
+        if control_steps < max_steps:
+            previous_executed_actions = current_executed_actions
+            previous_executed_action_valid_mask = current_executed_action_valid_mask
+            history_schedule.advance_generation()
 
     _log_gripper_distribution(gripper_values)
     return {

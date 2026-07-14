@@ -6,8 +6,9 @@ import msgpack
 import numpy as np
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 WIRE_FORMAT = "msgpack-numpy"
+REQUEST_TYPES = frozenset({"infer", "push_history_observation", "reset_history"})
 
 
 class WireProtocolError(RuntimeError):
@@ -35,30 +36,33 @@ def metadata_envelope(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def request_envelope(request_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+def request_envelope(request_type: str, request_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    request_type = _validate_request_type(request_type)
     return {
         "version": PROTOCOL_VERSION,
-        "type": "infer",
+        "type": request_type,
         "request_id": int(request_id),
         "payload": payload,
     }
 
 
-def success_envelope(request_id: int, data: Any) -> dict[str, Any]:
+def success_envelope(request_id: int, request_type: str, data: Any) -> dict[str, Any]:
     return {
         "version": PROTOCOL_VERSION,
-        "type": "inference_result",
+        "type": "result",
         "request_id": int(request_id),
+        "request_type": _validate_request_type(request_type),
         "ok": True,
         "data": data,
     }
 
 
-def error_envelope(request_id: int, message: str) -> dict[str, Any]:
+def error_envelope(request_id: int, request_type: str, message: str) -> dict[str, Any]:
     return {
         "version": PROTOCOL_VERSION,
-        "type": "inference_result",
+        "type": "result",
         "request_id": int(request_id),
+        "request_type": _validate_request_type(request_type),
         "ok": False,
         "error": {"message": str(message)},
     }
@@ -73,6 +77,14 @@ def validate_envelope(message: Any, *, expected_type: str | None = None) -> dict
     if expected_type is not None and message.get("type") != expected_type:
         raise WireProtocolError(f"Expected message type {expected_type!r}, got {message.get('type')!r}")
     return message
+
+
+def _validate_request_type(request_type: str) -> str:
+    if request_type not in REQUEST_TYPES:
+        raise WireProtocolError(
+            f"Unsupported request type {request_type!r}; expected one of {sorted(REQUEST_TYPES)}"
+        )
+    return request_type
 
 
 def _pack_numpy(value: Any) -> Any:

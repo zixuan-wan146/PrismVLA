@@ -13,8 +13,8 @@ class Qwen35BackboneConfig:
     model_name: str = "Qwen/Qwen3.5-0.8B"
     num_hidden_layers: int = 16
     hidden_size: int = 1024
-    num_action_queries: int = 48
-    image_size: int = 384
+    num_action_queries: int = 32
+    image_size: int = 256
     torch_dtype: str = "bfloat16"
     local_files_only: bool = False
 
@@ -31,10 +31,10 @@ class Qwen35BackboneConfig:
             raise ValueError("The accepted Qwen3.5 baseline requires exactly 16 retained layers")
         if self.hidden_size != 1024:
             raise ValueError("The accepted Qwen3.5-0.8B hidden size is 1024")
-        if self.num_action_queries != 48:
-            raise ValueError("The accepted baseline requires exactly 48 action queries")
-        if self.image_size <= 0 or self.image_size % 32 != 0:
-            raise ValueError("image_size must be positive and aligned to 32 pixels")
+        if self.num_action_queries != 32:
+            raise ValueError("The accepted task-state pipeline requires exactly 32 action queries")
+        if self.image_size != 256:
+            raise ValueError("The accepted task-state pipeline requires image_size=256")
         if self.torch_dtype not in {"bfloat16", "float32"}:
             raise ValueError(f"Unsupported torch_dtype {self.torch_dtype!r}")
 
@@ -46,7 +46,7 @@ class HistoryQFormerConfig:
     num_layers: int = 2
     num_heads: int = 4
     mlp_ratio: int = 4
-    num_memory_tokens: int = 24
+    num_memory_tokens: int = 16
     num_history_frames: int = 2
     max_relative_age: int = 8
     dropout: float = 0.0
@@ -72,8 +72,8 @@ class HistoryQFormerConfig:
             raise ValueError("hidden_size must be divisible by num_heads")
         if self.mlp_ratio <= 0:
             raise ValueError("mlp_ratio must be positive")
-        if self.num_memory_tokens != 24 or self.num_history_frames != 2:
-            raise ValueError("The accepted history contract uses 2 frames and 24 memory tokens")
+        if self.num_memory_tokens != 16 or self.num_history_frames != 2:
+            raise ValueError("The accepted history contract uses 2 frames and 16 memory tokens")
         if self.max_relative_age < 6:
             raise ValueError("max_relative_age must represent the accepted age 6 history frame")
         if not 0.0 <= self.dropout < 1.0:
@@ -162,11 +162,87 @@ class DirectActionHeadConfig:
 
 
 @dataclass(frozen=True)
+class TaskStatePlannerConfig:
+    query_layer: int = 12
+    query_input_dim: int = 1024
+    num_query_tokens: int = 32
+    hidden_size: int = 512
+    num_state_tokens: int = 8
+    num_plan_tokens: int = 16
+    action_dim: int = 7
+    action_horizon: int = 8
+    action_mlp_hidden_size: int = 256
+    mlp_hidden_size: int = 1024
+    num_attention_heads: int = 8
+    attention_dropout: float = 0.0
+    mlp_dropout: float = 0.0
+    plan_horizon_actions: int = 64
+    mamba_num_layers: int = 1
+    mamba_d_state: int = 16
+    mamba_d_conv: int = 4
+    mamba_expand: int = 2
+
+    def validate(self) -> None:
+        integer_fields = (
+            "query_layer",
+            "query_input_dim",
+            "num_query_tokens",
+            "hidden_size",
+            "num_state_tokens",
+            "num_plan_tokens",
+            "action_dim",
+            "action_horizon",
+            "action_mlp_hidden_size",
+            "mlp_hidden_size",
+            "num_attention_heads",
+            "plan_horizon_actions",
+            "mamba_num_layers",
+            "mamba_d_state",
+            "mamba_d_conv",
+            "mamba_expand",
+        )
+        for name in integer_fields:
+            _exact_int(getattr(self, name), f"task_state_planner.{name}")
+        _finite_number(self.attention_dropout, "task_state_planner.attention_dropout")
+        _finite_number(self.mlp_dropout, "task_state_planner.mlp_dropout")
+        expected = {
+            "query_layer": 12,
+            "query_input_dim": 1024,
+            "num_query_tokens": 32,
+            "hidden_size": 512,
+            "num_state_tokens": 8,
+            "num_plan_tokens": 16,
+            "action_dim": 7,
+            "action_horizon": 8,
+            "action_mlp_hidden_size": 256,
+            "mlp_hidden_size": 1024,
+            "num_attention_heads": 8,
+            "plan_horizon_actions": 64,
+            "mamba_num_layers": 1,
+            "mamba_d_state": 16,
+            "mamba_d_conv": 4,
+            "mamba_expand": 2,
+        }
+        mismatches = {
+            name: (getattr(self, name), accepted)
+            for name, accepted in expected.items()
+            if getattr(self, name) != accepted
+        }
+        if mismatches:
+            raise ValueError(f"Task-state planner parameters differ from the accepted pipeline: {mismatches}")
+        if self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError("task-state hidden_size must be divisible by num_attention_heads")
+        if self.attention_dropout != 0.0 or self.mlp_dropout != 0.0:
+            raise ValueError("The accepted task-state planner uses zero attention and MLP dropout")
+
+
+@dataclass(frozen=True)
 class PrismArchitectureConfig:
     backbone: Qwen35BackboneConfig = field(default_factory=Qwen35BackboneConfig)
     history: HistoryQFormerConfig = field(default_factory=HistoryQFormerConfig)
     temporal: TemporalContextConfig = field(default_factory=TemporalContextConfig)
     action_head: DirectActionHeadConfig = field(default_factory=DirectActionHeadConfig)
+    task_state_planner: TaskStatePlannerConfig = field(default_factory=TaskStatePlannerConfig)
     num_bridge_layers: int = 16
     memory_gate_init: float = 0.1
 
@@ -175,12 +251,24 @@ class PrismArchitectureConfig:
         self.history.validate()
         self.temporal.validate()
         self.action_head.validate()
+        self.task_state_planner.validate()
         _exact_int(self.num_bridge_layers, "bridge.num_layers")
         _finite_number(self.memory_gate_init, "bridge.memory_gate_init")
         if self.num_bridge_layers != self.backbone.num_hidden_layers:
             raise ValueError("Bridge depth must match retained Qwen depth")
         if self.memory_gate_init != 0.1:
             raise ValueError("The accepted memory gate initialization is 0.1")
+        planner = self.task_state_planner
+        if planner.query_input_dim != self.backbone.hidden_size:
+            raise ValueError("Task-state query input width must match the Qwen hidden size")
+        if planner.num_query_tokens != self.backbone.num_action_queries:
+            raise ValueError("Task-state query count must match the Qwen action-query count")
+        if planner.query_layer > self.backbone.num_hidden_layers:
+            raise ValueError("Task-state query layer must be retained by the Qwen backbone")
+        if planner.action_dim != self.action_head.action_dim:
+            raise ValueError("Task-state action width must match the action-head width")
+        if planner.action_horizon != self.temporal.action_horizon:
+            raise ValueError("Task-state action history must match the planning-cycle horizon")
 
     def validate_for_policy(self) -> None:
         self.validate()
@@ -208,6 +296,7 @@ def architecture_config_from_mapping(
         "history",
         "temporal",
         "action_head",
+        "task_state_planner",
         "bridge",
         "num_bridge_layers",
         "memory_gate_init",
@@ -231,11 +320,15 @@ def architecture_config_from_mapping(
         temporal_values["history_capture_offsets"] = _integer_tuple(temporal_values["history_capture_offsets"])
     temporal = TemporalContextConfig(**temporal_values)
     action_head = DirectActionHeadConfig(**_mapping(raw.get("action_head"), "action_head"))
+    task_state_planner = TaskStatePlannerConfig(
+        **_mapping(raw.get("task_state_planner"), "task_state_planner")
+    )
     config = PrismArchitectureConfig(
         backbone=backbone,
         history=history,
         temporal=temporal,
         action_head=action_head,
+        task_state_planner=task_state_planner,
         num_bridge_layers=raw.get("num_bridge_layers", bridge.get("num_layers", 16)),
         memory_gate_init=raw.get("memory_gate_init", bridge.get("memory_gate_init", 0.1)),
     )
